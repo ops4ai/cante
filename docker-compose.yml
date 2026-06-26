@@ -1,0 +1,123 @@
+name: cante
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: cante-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cante
+      POSTGRES_PASSWORD: cante
+      POSTGRES_DB: cante
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cante"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: cante-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  ingress:
+    build:
+      context: .
+      dockerfile: services/ingress/Dockerfile
+    container_name: cante-ingress
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "8001:8001"
+
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    container_name: cante-api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://cante:cante@postgres:5432/cante
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+  worker:
+    build:
+      context: .
+      dockerfile: services/worker/Dockerfile
+    container_name: cante-worker
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://cante:cante@postgres:5432/cante
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  sender:
+    build:
+      context: .
+      dockerfile: services/sender/Dockerfile
+    container_name: cante-sender
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: services/scheduler/Dockerfile
+    container_name: cante-scheduler
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://cante:cante@postgres:5432/cante
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  evolution:
+    image: atendai/evolution-api:latest
+    container_name: cante-evolution
+    restart: unless-stopped
+    environment:
+      - AUTHENTICATION_API_KEY=evolution-secret-key
+      - LANGUAGE=en
+    ports:
+      - "8088:8080"
+
+volumes:
+  postgres_data:
