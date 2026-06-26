@@ -1,4 +1,14 @@
+# NEVER commit these — secrets and credentials
 .env
+.env.*
+*.secrets
+*.key
+*.pem
+credentials*
+secrets/
+.codig.env
+
+# Python
 *.pyc
 __pycache__/
 *.egg-info/
@@ -8,8 +18,15 @@ venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# Node / frontend
 node_modules/
 build/
-*.log
+
+# Data / runtime
 data/
+*.log
+
+# OS
 .DS_Store
+
