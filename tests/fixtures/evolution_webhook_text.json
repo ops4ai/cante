@@ -1,0 +1,16 @@
+{
+  "event": "messages.upsert",
+  "data": {
+    "key": {
+      "id": "BAE5A1F2C3D4E5F6",
+      "remoteJid": "351912345678@s.whatsapp.net",
+      "fromMe": false,
+      "server": "351911223344"
+    },
+    "pushName": "Maria Silva",
+    "message": {
+      "messageType": "conversation",
+      "conversation": "Olá, gostava de marcar uma consulta para cortar o cabelo."
+    }
+  }
+}

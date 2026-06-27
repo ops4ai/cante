@@ -1,0 +1,16 @@
+{
+  "event": "messages.upsert",
+  "data": {
+    "key": {
+      "id": "XYZ_MEDIA_001",
+      "remoteJid": "351912345678@s.whatsapp.net",
+      "fromMe": false
+    },
+    "message": {
+      "messageType": "imageMessage",
+      "imageMessage": {
+        "caption": "Quero este corte de cabelo"
+      }
+    }
+  }
+}
