@@ -17,10 +17,10 @@ down:
 	$(COMPOSE_CMD) down
 
 seed:
-	$(COMPOSE_CMD) exec api python -m seeds.run
+	$(COMPOSE_CMD) exec api python -m seeds
 
 smoke:
-	$(COMPOSE_CMD) exec worker python -m tests.smoke
+	$(COMPOSE_CMD) exec api python -m tests.smoke
 
 test:
 	cd core && pytest -v --cov=cante --cov-report=term-missing
