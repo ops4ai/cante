@@ -1,0 +1,48 @@
+{{- range $svc := list "ingress" "api" "worker" "sender" }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $.Release.Name }}-{{ $svc }}
+  labels:
+    app: cante
+    service: {{ $svc }}
+spec:
+  replicas: {{ $.Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: cante
+      service: {{ $svc }}
+  template:
+    metadata:
+      labels:
+        app: cante
+        service: {{ $svc }}
+    spec:
+      containers:
+      - name: {{ $svc }}
+        image: "{{ $.Values.image.repository }}-{{ $svc }}:{{ $.Values.image.tag }}"
+        imagePullPolicy: {{ $.Values.image.pullPolicy }}
+        env:
+        - name: DATABASE_URL
+          value: postgresql+asyncpg://{{ $.Values.postgresql.auth.username }}:{{ $.Values.postgresql.auth.password }}@postgres:5432/{{ $.Values.postgresql.auth.database }}
+        - name: REDIS_URL
+          value: redis://redis:6379/0
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: {{ $.Release.Name }}-secrets
+              key: jwtSecret
+        - name: SECRET_ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ $.Release.Name }}-secrets
+              key: encryptionKey
+        - name: ANTHROPIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ $.Release.Name }}-secrets
+              key: anthropicApiKey
+        ports:
+        - containerPort: {{ index $.Values.services $svc "port" }}
+{{- end }}

@@ -119,5 +119,14 @@ services:
     ports:
       - "8088:8080"
 
+  mock-backend:
+    build:
+      context: ./examples/mock-backend
+      dockerfile: Dockerfile
+    container_name: cante-mock-backend
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+
 volumes:
   postgres_data:

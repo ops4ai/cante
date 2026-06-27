@@ -1,0 +1,62 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/ops4ai/cante
+  tag: latest
+  pullPolicy: Always
+
+services:
+  ingress:
+    enabled: true
+    port: 8001
+  api:
+    enabled: true
+    port: 8000
+  worker:
+    enabled: true
+    hpa:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 10
+      streamLagTarget: 100
+  sender:
+    enabled: true
+    hpa:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 5
+      streamLagTarget: 50
+  scheduler:
+    enabled: true
+
+postgresql:
+  enabled: true
+  auth:
+    username: cante
+    password: cante
+    database: cante
+
+redis:
+  enabled: true
+  architecture: standalone
+  auth:
+    enabled: false
+
+evolution:
+  enabled: false
+
+ingress:
+  enabled: true
+  className: traefik
+  hosts:
+    - host: cante.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+          service: api
+          port: 8000
+
+secrets:
+  jwtSecret: ""
+  encryptionKey: ""
+  anthropicApiKey: ""

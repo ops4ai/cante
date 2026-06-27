@@ -1,0 +1,27 @@
+{{- range $svc := list "worker" "sender" }}
+{{- if index $.Values.services $svc "hpa" "enabled" }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $.Release.Name }}-{{ $svc }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ $.Release.Name }}-{{ $svc }}
+  minReplicas: {{ index $.Values.services $svc "hpa" "minReplicas" }}
+  maxReplicas: {{ index $.Values.services $svc "hpa" "maxReplicas" }}
+  metrics:
+  - type: External
+    external:
+      metric:
+        name: redis_streams_lag
+        selector:
+          matchLabels:
+            stream: stream:inbound
+      target:
+        type: AverageValue
+        averageValue: "{{ index $.Values.services $svc "hpa" "streamLagTarget" }}"
+{{- end }}
+{{- end }}

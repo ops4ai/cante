@@ -1,0 +1,15 @@
+{{- range $svc := list "ingress" "api" }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $.Release.Name }}-{{ $svc }}
+spec:
+  selector:
+    app: cante
+    service: {{ $svc }}
+  ports:
+  - port: {{ index $.Values.services $svc "port" }}
+    targetPort: {{ index $.Values.services $svc "port" }}
+    protocol: TCP
+{{- end }}
