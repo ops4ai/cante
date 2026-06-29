@@ -1,5 +1,7 @@
 """OpenAI-compatible adapter — covers OpenAI, DeepSeek, OpenRouter, Ollama, Groq, etc."""
 
+import json
+
 import structlog
 
 from cante.llm import (
@@ -43,6 +45,21 @@ class OpenAICompatibleAdapter(LLMAdapter):
                 api_msg["tool_call_id"] = msg.tool_call_id
             if msg.name:
                 api_msg["name"] = msg.name
+            # Echo the assistant's own tool_calls back so the follow-up request
+            # is well-formed (OpenAI rejects a tool result without the matching
+            # assistant tool_calls preceding it).
+            if msg.role == "assistant" and msg.tool_calls:
+                api_msg["tool_calls"] = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": json.dumps(tc.arguments),
+                        },
+                    }
+                    for tc in msg.tool_calls
+                ]
             api_messages.append(api_msg)
 
         api_tools = [
@@ -83,7 +100,6 @@ class OpenAICompatibleAdapter(LLMAdapter):
                 tool_calls = []
                 if msg.get("tool_calls"):
                     for tc in msg["tool_calls"]:
-                        import json
                         args = tc["function"]["arguments"]
                         if isinstance(args, str):
                             args = json.loads(args)

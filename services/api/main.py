@@ -1,39 +1,122 @@
 """Cante API — backoffice control plane (FastAPI). Full CRUD for all entities."""
 
 import structlog
-from fastapi import FastAPI, Depends, HTTPException, Query, Request
+from fastapi import FastAPI, Depends, HTTPException, Request
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError
 
-from cante.auth import create_token, decode_token, hash_password, verify_password
-from cante.db import async_session_factory
+from cante.auth import (
+    Principal,
+    create_access_token,
+    create_refresh_token,
+    create_token_pair,
+    decode_token,
+    hash_password,
+    principal_from_token,
+    verify_password,
+)
+from cante.db import async_session_factory, run_migrations_async
+from cante.security import assert_no_default_secrets
 from cante.settings import settings
+from cante.tenant import with_bypass, with_tenant
 
 logger = structlog.get_logger(__name__)
 app = FastAPI(title="Cante API", version="0.1.0")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+# S8: CORS origins come from env (comma-separated); empty => same-origin only.
+_cors_origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()] if settings.cors_origins else []
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 security = HTTPBearer()
 
 
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+@app.on_event("startup")
+async def _enforce_startup_guard() -> None:
+    """S4: refuse to boot while any secret is still a shipped default / empty."""
+    assert_no_default_secrets()
+
+
+@app.on_event("startup")
+async def _run_migrations_on_startup() -> None:
+    """Ensure the DB schema exists before serving traffic (C1)."""
     try:
-        payload = decode_token(credentials.credentials)
-        if payload.get("type") != "access":
-            raise HTTPException(401, "Invalid token type")
-        return payload
+        await run_migrations_async()
+        logger.info("api.migrations_applied")
+    except Exception as e:  # pragma: no cover - startup logging only
+        logger.error("api.migration_failed", error=str(e))
+        raise
+
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> Principal:
+    try:
+        return principal_from_token(credentials.credentials, expected_type="access")
     except JWTError:
         raise HTTPException(401, "Invalid token")
 
 
+async def tenant_context(principal: Principal = Depends(get_current_user)) -> Principal:
+    """S1: scope the whole request to the caller's tenant (fail-closed reads/writes)."""
+    with with_tenant(principal.tenant_id):
+        yield principal
+
+
 class RequireRole:
+    """Require a role (admin always passes). Runs under a tenant context."""
+
     def __init__(self, role: str):
         self.role = role
 
-    async def __call__(self, user: dict = Depends(get_current_user)):
-        if user.get("role") != self.role and user.get("role") != "admin":
+    async def __call__(self, principal: Principal = Depends(tenant_context)) -> Principal:
+        if principal.role != self.role and principal.role != "admin":
             raise HTTPException(403, "Insufficient permissions")
-        return user
+        return principal
+
+
+# ── S6/S12 helpers ──────────────────────────────────────────────────
+
+
+async def load_owned(session, model, obj_id: str, principal: Principal):
+    """Load *obj_id* scoped to *principal*'s tenant; 404 on any mismatch.
+
+    Defense-in-depth on top of the data-layer filter (which already 404s
+    cross-tenant reads) — also covers code paths that run under a bypass.
+    """
+    from sqlalchemy import select
+
+    result = await session.execute(
+        select(model).where(model.id == obj_id, model.tenant_id == principal.tenant_id)
+    )
+    obj = result.scalar_one_or_none()
+    if obj is None:
+        raise HTTPException(404, f"{model.__name__} not found")
+    return obj
+
+
+async def log_audit(session, principal: Principal, action: str, entity: str, before: dict | None = None, after: dict | None = None) -> None:
+    """S12: append an AuditLog row (tenant-scoped). Caller commits the session."""
+    from cante.models import AuditLog
+
+    session.add(
+        AuditLog(
+            tenant_id=principal.tenant_id,
+            actor=principal.user_id,
+            action=action,
+            entity=entity,
+            before=before or {},
+            after=after or {},
+        )
+    )
+
+
+def _escape_like(s: str) -> str:
+    """S13: escape LIKE wildcards so user input can't broaden a search."""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 @app.get("/healthz")
@@ -43,30 +126,104 @@ async def health():
 
 # ── Auth ────────────────────────────────────────────────────────────
 
+class LoginIn(BaseModel):
+    email: str
+    password: str
+
+
+class RefreshIn(BaseModel):
+    refresh_token: str
+
+
+class UserCreateIn(BaseModel):
+    email: str
+    password: str
+    role: str = "operator"
+
+
+# S7: login throttle — 5 attempts per 15 min, per-IP and per-email.
+_LOGIN_MAX_ATTEMPTS = 5
+_LOGIN_WINDOW_SECONDS = 900
+
+
+async def _login_throttled(redis, ip: str, email: str) -> bool:
+    """Return True if the caller is currently throttled."""
+    for key in (f"login:ip:{ip}", f"login:email:{email.lower()}"):
+        count = await redis.incr(key)
+        if count == 1:
+            await redis.expire(key, _LOGIN_WINDOW_SECONDS)
+        if count > _LOGIN_MAX_ATTEMPTS:
+            return True
+    return False
+
+
 @app.post("/v1/auth/login")
-async def login(data: dict):
+async def login(data: LoginIn, request: Request):
     from cante.models import User
     from sqlalchemy import select
+    from cante.redis import get_redis
+
+    ip = (request.client.host if request.client else "unknown") or "unknown"
+    redis = await get_redis()
+    if await _login_throttled(redis, ip, data.email):
+        logger.warning("auth.login_throttled", ip=ip, email=data.email)
+        raise HTTPException(429, "Too many login attempts. Try again later.")
+
+    # S1: email is globally unique — look it up across tenants (bypass) to
+    # resolve the tenant, then bind subsequent requests to it.
     async with async_session_factory() as session:
-        result = await session.execute(select(User).where(User.email == data["email"]))
-        user = result.scalar_one_or_none()
-        if not user or not verify_password(data["password"], user.hashed_password):
+        with with_bypass():
+            result = await session.execute(select(User).where(User.email == data.email))
+            user = result.scalar_one_or_none()
+        ok = bool(user) and verify_password(data.password, user.hashed_password) if user else False
+        if not ok:
+            # S7: generic message, no user enumeration.
             raise HTTPException(401, "Invalid credentials")
-        access, refresh = create_token(user.id, user.role)
-        return {"access_token": access, "refresh_token": refresh, "user": {"id": user.id, "email": user.email, "role": user.role}}
+        access, refresh = create_token_pair(user.id, user.tenant_id, user.role)
+        return {
+            "access_token": access,
+            "refresh_token": refresh,
+            "user": {"id": user.id, "email": user.email, "role": user.role, "tenant_id": user.tenant_id},
+        }
+
+
+@app.post("/v1/auth/refresh")
+async def refresh(data: RefreshIn):
+    """S10: rotate refresh tokens — the presented jti is revoked, a new pair issued."""
+    from cante.redis import get_redis
+
+    try:
+        payload = decode_token(data.refresh_token, expected_type="refresh")
+    except JWTError:
+        raise HTTPException(401, "Invalid refresh token")
+    jti = payload.get("jti")
+    redis = await get_redis()
+    if jti and await redis.exists(f"revoked:jti:{jti}"):
+        raise HTTPException(401, "Refresh token revoked")
+    if jti:
+        await redis.set(f"revoked:jti:{jti}", "1", ex=settings.jwt_refresh_expire_days * 86_400)
+    access = create_access_token(payload["sub"], payload["tenant_id"], payload["role"])[0]
+    new_refresh = create_refresh_token(payload["sub"], payload["tenant_id"], payload["role"])[0]
+    return {"access_token": access, "refresh_token": new_refresh}
 
 
 @app.get("/v1/auth/me")
-async def me(user: dict = Depends(get_current_user)):
-    return {"id": user["sub"], "role": user["role"]}
+async def me(principal: Principal = Depends(get_current_user)):
+    return {"id": principal.user_id, "role": principal.role, "tenant_id": principal.tenant_id}
 
 
 @app.post("/v1/auth/users")
-async def create_user(data: dict, _: dict = Depends(RequireRole("admin"))):
+async def create_user(data: UserCreateIn, principal: Principal = Depends(RequireRole("admin"))):
     from cante.models import User
     async with async_session_factory() as session:
-        u = User(email=data["email"], hashed_password=hash_password(data["password"]), role=data.get("role", "operator"))
+        u = User(
+            email=data.email,
+            hashed_password=hash_password(data.password),
+            role=data.role,
+            tenant_id=principal.tenant_id,  # S1: server-side, never from client
+        )
         session.add(u)
+        await log_audit(session, principal, "user.create", f"user:{u.email}", after={"email": u.email, "role": u.role})
         await session.commit()
         return {"id": u.id, "email": u.email, "role": u.role}
 
@@ -74,7 +231,7 @@ async def create_user(data: dict, _: dict = Depends(RequireRole("admin"))):
 # ── Numbers ─────────────────────────────────────────────────────────
 
 @app.get("/v1/numbers")
-async def list_numbers(_: dict = Depends(get_current_user)):
+async def list_numbers(principal: Principal = Depends(tenant_context)):
     from cante.models import Number
     from sqlalchemy import select
     async with async_session_factory() as session:
@@ -83,34 +240,39 @@ async def list_numbers(_: dict = Depends(get_current_user)):
 
 
 @app.post("/v1/numbers")
-async def create_number(data: dict, _: dict = Depends(get_current_user)):
+async def create_number(data: dict, principal: Principal = Depends(RequireRole("admin"))):
     from cante.models import Number
     async with async_session_factory() as session:
         n = Number(phone=data["phone"], display_name=data.get("display_name", ""), channel_type=data.get("channel_type", "whatsapp_evolution"))
         session.add(n)
+        await session.flush()
+        await log_audit(session, principal, "number.create", f"number:{n.id}", after={"phone": n.phone, "channel_type": n.channel_type})
         await session.commit()
         return {"id": n.id, "phone": n.phone, "status": n.status}
 
 
 @app.get("/v1/numbers/{num_id}/qr")
-async def get_qr(num_id: str, _: dict = Depends(get_current_user)):
-    return {"qr_code": f"https://evolution:8080/instance/qr/{num_id}", "status": "qr_pending"}
+async def get_qr(num_id: str, principal: Principal = Depends(RequireRole("admin"))):
+    # S15: not yet wired to the Evolution gateway — fail honestly rather than
+    # return a fabricated internal URL that looks like a real QR.
+    raise HTTPException(501, "QR pairing not implemented; configure the channel via the Evolution API directly.")
 
 
 @app.post("/v1/numbers/{num_id}/connect")
-async def connect_number(num_id: str, _: dict = Depends(get_current_user)):
-    return {"status": "qr_pending"}
+async def connect_number(num_id: str, principal: Principal = Depends(RequireRole("admin"))):
+    # S15: stub — label explicitly so callers don't assume a live connection.
+    raise HTTPException(501, "Number connect not implemented.")
 
 
 @app.post("/v1/numbers/{num_id}/disconnect")
-async def disconnect_number(num_id: str, _: dict = Depends(get_current_user)):
+async def disconnect_number(num_id: str, principal: Principal = Depends(RequireRole("admin"))):
     return {"status": "disconnected"}
 
 
 # ── Bots ────────────────────────────────────────────────────────────
 
 @app.get("/v1/bots")
-async def list_bots(_: dict = Depends(get_current_user)):
+async def list_bots(principal: Principal = Depends(tenant_context)):
     from cante.models import Bot
     from sqlalchemy import select
     async with async_session_factory() as session:
@@ -119,29 +281,29 @@ async def list_bots(_: dict = Depends(get_current_user)):
 
 
 @app.post("/v1/bots")
-async def create_bot(data: dict, _: dict = Depends(get_current_user)):
+async def create_bot(data: dict, principal: Principal = Depends(RequireRole("admin"))):
     from cante.models import Bot
     async with async_session_factory() as session:
         b = Bot(name=data["name"], skill_id=data["skill_id"], provider_id=data["provider_id"], type_label=data.get("type_label", "custom"), language_default=data.get("language_default", "en"))
         session.add(b)
+        await session.flush()
+        await log_audit(session, principal, "bot.create", f"bot:{b.id}", after={"name": b.name, "skill_id": b.skill_id, "provider_id": b.provider_id})
         await session.commit()
         return {"id": b.id, "name": b.name}
 
 
 @app.patch("/v1/bots/{bot_id}")
-async def update_bot(bot_id: str, data: dict, _: dict = Depends(get_current_user)):
+async def update_bot(bot_id: str, data: dict, principal: Principal = Depends(RequireRole("admin"))):
     from cante.models import Bot
-    from sqlalchemy import select
     async with async_session_factory() as session:
-        result = await session.execute(select(Bot).where(Bot.id == bot_id))
-        b = result.scalar_one_or_none()
-        if not b:
-            raise HTTPException(404, "Bot not found")
+        b = await load_owned(session, Bot, bot_id, principal)
+        before = {"name": b.name, "type_label": b.type_label, "enabled": b.enabled}
         for field in ("name", "type_label", "language_default", "skill_id", "provider_id"):
             if field in data:
                 setattr(b, field, data[field])
         if "enabled" in data:
             b.enabled = data["enabled"]
+        await log_audit(session, principal, "bot.update", f"bot:{b.id}", before=before, after={"name": b.name, "enabled": b.enabled})
         await session.commit()
         return {"id": b.id, "name": b.name}
 
@@ -149,7 +311,7 @@ async def update_bot(bot_id: str, data: dict, _: dict = Depends(get_current_user
 # ── Skills ──────────────────────────────────────────────────────────
 
 @app.get("/v1/skills")
-async def list_skills(_: dict = Depends(get_current_user)):
+async def list_skills(principal: Principal = Depends(tenant_context)):
     from cante.models import Skill
     from sqlalchemy import select
     async with async_session_factory() as session:
@@ -158,12 +320,13 @@ async def list_skills(_: dict = Depends(get_current_user)):
 
 
 @app.post("/v1/skills")
-async def create_skill(data: dict, _: dict = Depends(get_current_user)):
+async def create_skill(data: dict, principal: Principal = Depends(RequireRole("admin"))):
     from cante.models import Skill
     async with async_session_factory() as session:
         s = Skill(name=data["name"], preset=data.get("preset", "custom"), playbook_md=data.get("playbook_md", ""), guardrails_md=data.get("guardrails_md", ""), language_default=data.get("language_default", "en"), scope=data.get("scope", {}), tools=data.get("tools", {}), done_condition=data.get("done_condition", ""), escalation=data.get("escalation", {}))
         session.add(s)
-        await session.commit()
+        await session.flush()
+        await log_audit(session, principal, "skill.create", f"skill:{s.id}", after={"name": s.name, "preset": s.preset})
         # Create first version snapshot
         from cante.models import SkillVersion
         session.add(SkillVersion(skill_id=s.id, version=1, snapshot={"name": s.name, "playbook_md": s.playbook_md, "guardrails_md": s.guardrails_md, "scope": s.scope, "tools": s.tools, "done_condition": s.done_condition, "escalation": s.escalation}))
@@ -172,14 +335,11 @@ async def create_skill(data: dict, _: dict = Depends(get_current_user)):
 
 
 @app.patch("/v1/skills/{skill_id}")
-async def update_skill(skill_id: str, data: dict, _: dict = Depends(get_current_user)):
+async def update_skill(skill_id: str, data: dict, principal: Principal = Depends(RequireRole("admin"))):
     from cante.models import Skill, SkillVersion
     from sqlalchemy import func, select
     async with async_session_factory() as session:
-        result = await session.execute(select(Skill).where(Skill.id == skill_id))
-        s = result.scalar_one_or_none()
-        if not s:
-            raise HTTPException(404, "Skill not found")
+        s = await load_owned(session, Skill, skill_id, principal)
         for field in ("name", "preset", "playbook_md", "guardrails_md", "language_default", "done_condition"):
             if field in data:
                 setattr(s, field, data[field])
@@ -191,6 +351,7 @@ async def update_skill(skill_id: str, data: dict, _: dict = Depends(get_current_
             s.escalation = data["escalation"]
         max_v = (await session.execute(select(func.max(SkillVersion.version)).where(SkillVersion.skill_id == skill_id))).scalar() or 0
         session.add(SkillVersion(skill_id=s.id, version=max_v + 1, snapshot={"name": s.name, "playbook_md": s.playbook_md, "guardrails_md": s.guardrails_md, "scope": s.scope, "tools": s.tools, "done_condition": s.done_condition, "escalation": s.escalation}))
+        await log_audit(session, principal, "skill.update", f"skill:{s.id}", after={"name": s.name, "version": max_v + 1})
         await session.commit()
         return {"id": s.id, "name": s.name, "version": max_v + 1}
 
@@ -198,7 +359,7 @@ async def update_skill(skill_id: str, data: dict, _: dict = Depends(get_current_
 # ── Providers ───────────────────────────────────────────────────────
 
 @app.get("/v1/providers")
-async def list_providers(_: dict = Depends(get_current_user)):
+async def list_providers(principal: Principal = Depends(tenant_context)):
     from cante.models import Provider
     from sqlalchemy import select
     async with async_session_factory() as session:
@@ -207,11 +368,13 @@ async def list_providers(_: dict = Depends(get_current_user)):
 
 
 @app.post("/v1/providers")
-async def create_provider(data: dict, _: dict = Depends(get_current_user)):
+async def create_provider(data: dict, principal: Principal = Depends(RequireRole("admin"))):
     from cante.models import Provider
     async with async_session_factory() as session:
         p = Provider(name=data["name"], type=data["type"], base_url=data["base_url"], model=data["model"], api_key_ref=data["api_key_ref"], params=data.get("params", {}))
         session.add(p)
+        await session.flush()
+        await log_audit(session, principal, "provider.create", f"provider:{p.id}", after={"name": p.name, "type": p.type, "model": p.model})
         await session.commit()
         return {"id": p.id, "name": p.name, "type": p.type}
 
@@ -219,7 +382,7 @@ async def create_provider(data: dict, _: dict = Depends(get_current_user)):
 # ── Routes ──────────────────────────────────────────────────────────
 
 @app.get("/v1/routes")
-async def list_routes(_: dict = Depends(get_current_user)):
+async def list_routes(principal: Principal = Depends(tenant_context)):
     from cante.models import Route
     from sqlalchemy import select
     async with async_session_factory() as session:
@@ -228,24 +391,23 @@ async def list_routes(_: dict = Depends(get_current_user)):
 
 
 @app.post("/v1/routes")
-async def create_route(data: dict, _: dict = Depends(get_current_user)):
+async def create_route(data: dict, principal: Principal = Depends(RequireRole("admin"))):
     from cante.models import Route
     async with async_session_factory() as session:
         r = Route(number_id=data["number_id"], bot_id=data["bot_id"], selector=data.get("selector", "default"), selector_value=data.get("selector_value", ""), priority=data.get("priority", 0))
         session.add(r)
+        await session.flush()
+        await log_audit(session, principal, "route.create", f"route:{r.id}", after={"number_id": r.number_id, "bot_id": r.bot_id, "selector": r.selector})
         await session.commit()
         return {"id": r.id, "selector": r.selector}
 
 
 @app.delete("/v1/routes/{route_id}")
-async def delete_route(route_id: str, _: dict = Depends(get_current_user)):
+async def delete_route(route_id: str, principal: Principal = Depends(RequireRole("admin"))):
     from cante.models import Route
-    from sqlalchemy import select
     async with async_session_factory() as session:
-        result = await session.execute(select(Route).where(Route.id == route_id))
-        r = result.scalar_one_or_none()
-        if not r:
-            raise HTTPException(404, "Route not found")
+        r = await load_owned(session, Route, route_id, principal)
+        await log_audit(session, principal, "route.delete", f"route:{r.id}", before={"number_id": r.number_id, "bot_id": r.bot_id})
         await session.delete(r)
         await session.commit()
         return {"deleted": True}
@@ -254,30 +416,31 @@ async def delete_route(route_id: str, _: dict = Depends(get_current_user)):
 # ── Contacts ────────────────────────────────────────────────────────
 
 @app.get("/v1/contacts")
-async def list_contacts(number_id: str = "", group_id: str = "", search: str = "", _: dict = Depends(get_current_user)):
+async def list_contacts(number_id: str = "", group_id: str = "", search: str = "", principal: Principal = Depends(tenant_context)):
     from cante.models import Contact
     from sqlalchemy import select
     async with async_session_factory() as session:
         stmt = select(Contact).order_by(Contact.last_seen.desc()).limit(100)
         if search:
-            stmt = stmt.where((Contact.name.ilike(f"%{search}%")) | (Contact.phone.ilike(f"%{search}%")))
+            esc = _escape_like(search)
+            stmt = stmt.where(
+                (Contact.name.ilike(f"%{esc}%", escape="\\")) | (Contact.phone.ilike(f"%{esc}%", escape="\\"))
+            )
         result = await session.execute(stmt)
         return [{"id": c.id, "phone": c.phone, "name": c.name, "attributes": c.attributes, "first_seen": str(c.first_seen), "last_seen": str(c.last_seen)} for c in result.scalars().all()]
 
 
 @app.patch("/v1/contacts/{contact_id}")
-async def update_contact(contact_id: str, data: dict, _: dict = Depends(get_current_user)):
+async def update_contact(contact_id: str, data: dict, principal: Principal = Depends(tenant_context)):
     from cante.models import Contact
-    from sqlalchemy import select
     async with async_session_factory() as session:
-        result = await session.execute(select(Contact).where(Contact.id == contact_id))
-        c = result.scalar_one_or_none()
-        if not c:
-            raise HTTPException(404, "Contact not found")
+        c = await load_owned(session, Contact, contact_id, principal)
+        before = {"name": c.name, "attributes": c.attributes}
         if "name" in data:
             c.name = data["name"]
         if "attributes" in data:
             c.attributes = {**c.attributes, **data["attributes"]}
+        await log_audit(session, principal, "contact.update", f"contact:{c.id}", before=before, after={"name": c.name, "attributes": c.attributes})
         await session.commit()
         return {"id": c.id, "name": c.name}
 
@@ -285,7 +448,7 @@ async def update_contact(contact_id: str, data: dict, _: dict = Depends(get_curr
 # ── Contact Groups ──────────────────────────────────────────────────
 
 @app.get("/v1/groups")
-async def list_groups(_: dict = Depends(get_current_user)):
+async def list_groups(principal: Principal = Depends(tenant_context)):
     from cante.models import ContactGroup
     from sqlalchemy import select
     async with async_session_factory() as session:
@@ -294,7 +457,7 @@ async def list_groups(_: dict = Depends(get_current_user)):
 
 
 @app.post("/v1/groups")
-async def create_group(data: dict, _: dict = Depends(get_current_user)):
+async def create_group(data: dict, principal: Principal = Depends(tenant_context)):
     from cante.models import ContactGroup
     async with async_session_factory() as session:
         g = ContactGroup(name=data["name"], number_id=data.get("number_id"))
@@ -304,7 +467,7 @@ async def create_group(data: dict, _: dict = Depends(get_current_user)):
 
 
 @app.post("/v1/groups/{group_id}/members")
-async def add_member(group_id: str, data: dict, _: dict = Depends(get_current_user)):
+async def add_member(group_id: str, data: dict, principal: Principal = Depends(tenant_context)):
     from cante.models import GroupMembership
     async with async_session_factory() as session:
         m = GroupMembership(contact_id=data["contact_id"], group_id=group_id)
@@ -318,7 +481,7 @@ async def add_member(group_id: str, data: dict, _: dict = Depends(get_current_us
 @app.get("/v1/conversations")
 async def list_conversations(
     state: str = "", bot_id: str = "", number_id: str = "", search: str = "",
-    _: dict = Depends(get_current_user),
+    principal: Principal = Depends(tenant_context),
 ):
     from cante.models import Conversation
     from sqlalchemy import select
@@ -328,64 +491,62 @@ async def list_conversations(
             stmt = stmt.where(Conversation.state == state)
         if bot_id:
             stmt = stmt.where(Conversation.bot_id == bot_id)
+        if number_id:
+            stmt = stmt.where(Conversation.number_id == number_id)
         result = await session.execute(stmt)
         return [{"id": c.id, "state": c.state, "language_detected": c.language_detected, "contact_id": c.contact_id, "bot_id": c.bot_id, "number_id": c.number_id, "last_activity_at": str(c.last_activity_at), "started_at": str(c.started_at)} for c in result.scalars().all()]
 
 
 @app.get("/v1/conversations/{conv_id}")
-async def get_conversation(conv_id: str, _: dict = Depends(get_current_user)):
+async def get_conversation(conv_id: str, principal: Principal = Depends(tenant_context)):
     from cante.models import Conversation, Message
     from sqlalchemy import select
     async with async_session_factory() as session:
-        result = await session.execute(select(Conversation).where(Conversation.id == conv_id))
-        conv = result.scalar_one_or_none()
-        if not conv:
-            raise HTTPException(404, "Conversation not found")
+        conv = await load_owned(session, Conversation, conv_id, principal)
         msgs = (await session.execute(select(Message).where(Message.conversation_id == conv_id).order_by(Message.created_at).limit(100))).scalars().all()
         return {"id": conv.id, "state": conv.state, "context_json": conv.context_json, "messages": [{"id": m.id, "direction": m.direction, "role": m.role, "body": m.body, "created_at": str(m.created_at)} for m in msgs]}
 
 
 @app.post("/v1/conversations/{conv_id}/takeover")
-async def takeover(conv_id: str, _: dict = Depends(get_current_user)):
+async def takeover(conv_id: str, principal: Principal = Depends(tenant_context)):
     from cante.models import Conversation
-    from sqlalchemy import select
     async with async_session_factory() as session:
-        result = await session.execute(select(Conversation).where(Conversation.id == conv_id))
-        conv = result.scalar_one_or_none()
-        if not conv:
-            raise HTTPException(404, "Conversation not found")
+        conv = await load_owned(session, Conversation, conv_id, principal)
+        before = {"state": conv.state}
         conv.state = "active"
+        await log_audit(session, principal, "conversation.takeover", f"conversation:{conv.id}", before=before, after={"state": conv.state})
         await session.commit()
         return {"id": conv.id, "state": conv.state}
 
 
 @app.post("/v1/conversations/{conv_id}/send")
-async def send_as_human(conv_id: str, data: dict, _: dict = Depends(get_current_user)):
+async def send_as_human(conv_id: str, data: dict, principal: Principal = Depends(tenant_context)):
     from cante.bus import RedisStreamsBus
-    from cante.models import Conversation
+    from cante.models import Conversation, Number
     from cante.redis import get_redis
     from sqlalchemy import select
     async with async_session_factory() as session:
-        result = await session.execute(select(Conversation).where(Conversation.id == conv_id))
-        conv = result.scalar_one_or_none()
-        if not conv:
-            raise HTTPException(404, "Conversation not found")
+        conv = await load_owned(session, Conversation, conv_id, principal)
+        # S11: route the human reply via the conversation's own Number so the
+        # outbound message carries the correct sender, not an empty string.
+        number = (await session.execute(select(Number).where(Number.id == conv.number_id))).scalar_one_or_none()
+        number_phone = number.phone if number else ""
         redis = await get_redis()
         bus = RedisStreamsBus(redis)
-        await bus.publish("stream:outbound", {"conversation_id": conv_id, "from_phone": "", "number_phone": "", "body": data["body"]})
+        await bus.publish("stream:outbound", {"conversation_id": conv_id, "from_phone": "", "number_phone": number_phone, "body": data["body"]})
+        await log_audit(session, principal, "conversation.send_as_human", f"conversation:{conv.id}", after={"body": data["body"], "number_phone": number_phone})
+        await session.commit()
         return {"status": "sent"}
 
 
 @app.post("/v1/conversations/{conv_id}/close")
-async def close_conv(conv_id: str, _: dict = Depends(get_current_user)):
+async def close_conv(conv_id: str, principal: Principal = Depends(tenant_context)):
     from cante.models import Conversation
-    from sqlalchemy import select
     async with async_session_factory() as session:
-        result = await session.execute(select(Conversation).where(Conversation.id == conv_id))
-        conv = result.scalar_one_or_none()
-        if not conv:
-            raise HTTPException(404)
+        conv = await load_owned(session, Conversation, conv_id, principal)
+        before = {"state": conv.state}
         conv.state = "closed"
+        await log_audit(session, principal, "conversation.close", f"conversation:{conv.id}", before=before, after={"state": conv.state})
         await session.commit()
         return {"id": conv.id, "state": "closed"}
 
@@ -393,7 +554,7 @@ async def close_conv(conv_id: str, _: dict = Depends(get_current_user)):
 # ── Learning ────────────────────────────────────────────────────────
 
 @app.get("/v1/learnings")
-async def list_learnings(status: str = "", _: dict = Depends(get_current_user)):
+async def list_learnings(status: str = "", principal: Principal = Depends(tenant_context)):
     from cante.models import Learning
     from sqlalchemy import select
     async with async_session_factory() as session:
@@ -405,31 +566,27 @@ async def list_learnings(status: str = "", _: dict = Depends(get_current_user)):
 
 
 @app.post("/v1/learnings/{learning_id}/approve")
-async def approve_learning(learning_id: str, _: dict = Depends(get_current_user)):
+async def approve_learning(learning_id: str, principal: Principal = Depends(tenant_context)):
     from cante.models import Learning
-    from sqlalchemy import select
     async with async_session_factory() as session:
-        result = await session.execute(select(Learning).where(Learning.id == learning_id))
-        l = result.scalar_one_or_none()
-        if not l:
-            raise HTTPException(404)
+        l = await load_owned(session, Learning, learning_id, principal)
+        before = {"status": l.status}
         l.status = "approved"
-        l.reviewed_by = _["sub"]
+        l.reviewed_by = principal.user_id
+        await log_audit(session, principal, "learning.approve", f"learning:{l.id}", before=before, after={"status": l.status})
         await session.commit()
         return {"id": l.id, "status": "approved"}
 
 
 @app.post("/v1/learnings/{learning_id}/reject")
-async def reject_learning(learning_id: str, _: dict = Depends(get_current_user)):
+async def reject_learning(learning_id: str, principal: Principal = Depends(tenant_context)):
     from cante.models import Learning
-    from sqlalchemy import select
     async with async_session_factory() as session:
-        result = await session.execute(select(Learning).where(Learning.id == learning_id))
-        l = result.scalar_one_or_none()
-        if not l:
-            raise HTTPException(404)
+        l = await load_owned(session, Learning, learning_id, principal)
+        before = {"status": l.status}
         l.status = "rejected"
-        l.reviewed_by = _["sub"]
+        l.reviewed_by = principal.user_id
+        await log_audit(session, principal, "learning.reject", f"learning:{l.id}", before=before, after={"status": l.status})
         await session.commit()
         return {"id": l.id, "status": "rejected"}
 
@@ -437,7 +594,7 @@ async def reject_learning(learning_id: str, _: dict = Depends(get_current_user))
 # ── Metrics ──────────────────────────────────────────────────────────
 
 @app.get("/v1/metrics/overview")
-async def metrics_overview(_: dict = Depends(get_current_user)):
+async def metrics_overview(principal: Principal = Depends(tenant_context)):
     from cante.models import Bot, Conversation, Message, Number
     from sqlalchemy import func, select
     async with async_session_factory() as session:
@@ -455,7 +612,7 @@ async def metrics_overview(_: dict = Depends(get_current_user)):
 # ── Audit ───────────────────────────────────────────────────────────
 
 @app.get("/v1/audit")
-async def list_audit(_: dict = Depends(RequireRole("admin"))):
+async def list_audit(principal: Principal = Depends(RequireRole("admin"))):
     from cante.models import AuditLog
     from sqlalchemy import select
     async with async_session_factory() as session:
@@ -467,8 +624,13 @@ async def list_audit(_: dict = Depends(RequireRole("admin"))):
 
 @app.post("/v1/triggers")
 async def create_trigger(data: dict, request: Request):
-    api_key = request.headers.get("X-API-Key", "")
-    if api_key != settings.jwt_secret:
+    # S2: machine-to-machine trigger key, separate from the JWT secret,
+    # compared in constant time to avoid timing oracles.
+    import secrets as _pysecrets
+
+    if not settings.trigger_api_key or not _pysecrets.compare_digest(
+        request.headers.get("X-API-Key", ""), settings.trigger_api_key
+    ):
         raise HTTPException(401, "Invalid API key")
     from cante.bus import RedisStreamsBus
     from cante.redis import get_redis

@@ -10,11 +10,25 @@ class Tool(Protocol):
     parameters: dict  # JSON Schema
 
 
-@dataclass
 class BuiltinTool:
-    name: str
-    description: str
-    parameters: dict
+    """Base for code-defined tools.
+
+    Subclasses set ``name``/``description``/``parameters`` as class attributes
+    and override ``execute``; they are instantiated with no arguments. Callers
+    may also pass overrides positionally (used by tests).
+    """
+
+    name: str = ""
+    description: str = ""
+    parameters: dict = {}  # JSON Schema; read-only config, shared default is fine
+
+    def __init__(self, name: str | None = None, description: str | None = None, parameters: dict | None = None) -> None:
+        if name is not None:
+            self.name = name
+        if description is not None:
+            self.description = description
+        if parameters is not None:
+            self.parameters = parameters
 
     async def execute(self, arguments: dict, context: dict) -> Any:
         raise NotImplementedError
@@ -34,12 +48,32 @@ class DeclaredHttpTool:
     response_mapping: str = "json"
     allowed_hosts: list = field(default_factory=list)
 
+    # Only these methods may be invoked by a model-driven HTTP tool. Anything
+    # else (PUT/DELETE/PATCH) is a privilege-escalation footgun for an LLM.
+    _SAFE_METHODS = frozenset({"GET", "POST"})
+
+    # Hard cap on bytes read from a tool response — prevents a malicious or
+    # misconfigured endpoint from exhausting worker memory.
+    _MAX_RESPONSE_BYTES = 1_000_000  # 1 MiB
+
     async def execute(self, arguments: dict, secrets: dict | None = None) -> Any:
         import httpx
+
+        method = (self.http_method or "GET").upper()
+        if method not in self._SAFE_METHODS:
+            raise ValueError(f"DeclaredHttpTool refuses method {method!r} (GET/POST only)")
 
         url = self.http_url
         for key, val in arguments.items():
             url = url.replace(f"{{{key}}}", str(val))
+
+        # S3: SSRF egress filter — reject internal/metadata/file:// before any
+        # request leaves the process. allowed_hosts (per-skill allowlist) is
+        # honoured when set.
+        from cante.security import is_safe_url
+
+        if not is_safe_url(url, allowed_hosts=self.allowed_hosts):
+            raise ValueError(f"DeclaredHttpTool refused unsafe URL: {url!r}")
 
         headers = dict(self.http_headers)
         # Resolve secret references: {{secret:integration_token}}
@@ -51,11 +85,22 @@ class DeclaredHttpTool:
             else:
                 resolved_headers[k] = v
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(self.timeout_s)) as client:
-            resp = await client.request(
-                self.http_method, url, headers=resolved_headers
-            )
+        # Redirects are disabled so a safe public host cannot bounce us to an
+        # internal address. A 3xx is surfaced as an error rather than followed.
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(self.timeout_s), follow_redirects=False
+        ) as client:
+            resp = await client.request(method, url, headers=resolved_headers)
+            if resp.is_redirect:
+                raise ValueError(f"DeclaredHttpTool refused redirect to {resp.headers.get('location')!r}")
             resp.raise_for_status()
+
+            # Cap response size before parsing.
+            raw = await resp.aread()
+            if len(raw) > self._MAX_RESPONSE_BYTES:
+                raise ValueError(
+                    f"DeclaredHttpTool response too large: {len(raw)} > {self._MAX_RESPONSE_BYTES} bytes"
+                )
             if self.response_mapping == "json":
                 return resp.json()
             return resp.text

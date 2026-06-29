@@ -1,0 +1,49 @@
+{
+  "version": "1",
+  "description": "Machine-readable state for all reports in this directory. Agents read this to know what has been addressed and what is pending. Severity mapping for code-review reports: must_fix->critical, should_fix->medium, nice->low.",
+  "reports": {
+    "security/2026-06-27-initial-security-review.md": {
+      "status": "superseded",
+      "findings_total": 5,
+      "findings_fixed": 0,
+      "findings_critical": 0,
+      "findings_medium": 3,
+      "findings_low": 2,
+      "last_updated": "2026-06-28",
+      "notes": "Superseded by 2026-06-28 comprehensive audit. Its 3 medium findings (JWT default guard, trigger API key separation, SSRF allowlist) are re-scoped there as S4/S2/S3."
+    },
+    "code-review/2026-06-27-initial-code-review.md": {
+      "status": "superseded",
+      "findings_total": 7,
+      "findings_fixed": 0,
+      "findings_critical": 0,
+      "findings_medium": 4,
+      "findings_low": 3,
+      "last_updated": "2026-06-28",
+      "notes": "Superseded by 2026-06-28 comprehensive code review. Findings re-scoped there."
+    },
+    "security/2026-06-28-comprehensive-security-audit.md": {
+      "status": "remediated",
+      "findings_total": 18,
+      "findings_fixed": 17,
+      "findings_critical": 4,
+      "findings_medium": 7,
+      "findings_low": 6,
+      "last_updated": "2026-06-29",
+      "notes": "17/18 remediated by the security agent. S1-S13 and S15-S18 closed (criticals S1/S2/S3/S4 first). S14 (KeyError->500 leaks field names) is NOT in the security handoff brief — covered by the engineer agent's Pydantic request models (code-review C19, in progress). Criticals: S1 fail-closed multi-tenancy (TenantScoped mixin + do_orm_execute/before_attach enforcement in cante.tenant), S2 webhook HMAC/token auth + trigger compare_digest + separate key, S3 is_safe_url SSRF egress filter in DeclaredHttpTool.execute, S4 assert_no_default_secrets startup guard (API+worker) + Fernet key validation (S9). Mediums/low: S5 RequireRole admin, S6 load_owned IDOR guard, S7 login Pydantic+throttle, S10 JWT type+jti refresh rotation, S12 log_audit on writes, S8 CORS env, S13 LIKE escape, S15 stubs labeled 501, S16 fenced scheduler leader lock, S17 ports 127.0.0.1 + Redis ACL, S18 docs/reports un-ignored. Verified by core/tests/test_security.py, test_auth.py, test_tools_ssrf.py, test_tenant.py and tests/test_security_api.py (61 security tests). Coordination: TenantScoped mixin + is_safe_url are shared touchpoints with the engineer agent; BuiltinTool was fixed by the engineer to support the worker subclass pattern. 1 unrelated failure remains in tests/test_worker_process.py::test_failure_leaves_entry_pending_then_redelivered (engineer's C4 redelivery/ack logic, not security scope). Full status: docs/reports/handoff/2026-06-29-security-agent-status.md."
+    },
+    "code-review/2026-06-28-comprehensive-code-review.md": {
+      "status": "in_progress",
+      "findings_total": 21,
+      "findings_fixed": 8,
+      "findings_critical": 7,
+      "findings_medium": 8,
+      "findings_low": 6,
+      "findings_must_fix": 7,
+      "findings_should_fix": 8,
+      "findings_nice": 6,
+      "last_updated": "2026-06-29",
+      "notes": "In progress (engineer agent). All 7 must-fix DONE + verified: C1 (alembic migrations + run_migrations at API startup + Makefile/Dockerfile + test_migrations), C2 (worker runs real LLM: route resolution, contact ON CONFLICT upsert, bot/skill/provider load with bypass then tenant context, adapter from env/Secret, Message in/out persisted), C3 (LLMMessage.tool_calls + adapter serialization + one assistant msg before tool results; also fixed LLMResponse.finish_reason derivation), C4 (ack only on success + XAUTOCLAIM sweep + per-entry retry counter + dead-letter stream), C5 (bus catches only NOGROUP/BUSYGROUP, re-raises rest, removed dead bytes-decode, +claim_pending), C6 (number_id filter applied), C7 (seeds use settings.admin_email/password + refuse-on-default + tenant context). C10 indexes folded into C1 migration. Remaining (should/nice): C8 shared httpx client, C9 single metrics query, C11 pagination, C12 GuardPipeline wired, C14 lock TTL/heartbeat, C16 guards polymorphic check, C18 evolution shared dataclasses, C19 Pydantic request models, C20 test/CI infra (conftest fixtures + smoke assertions partially done), C21 takeover->human_active. See docs/reports/handoff/2026-06-29-engineer-status.md for full status."
+    }
+  }
+}

@@ -27,9 +27,6 @@ build/
 data/
 *.log
 
-# Reports — keep locally until ready to publish
-docs/reports/
-
 # OS
 .DS_Store
 

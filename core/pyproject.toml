@@ -13,6 +13,10 @@ dependencies = [
     "structlog>=24.0",
     "python-jose[cryptography]>=3.3",
     "passlib[bcrypt]>=1.7",
+    # passlib 1.7.4's bcrypt backend is incompatible with bcrypt>=4 (it probes
+    # with a >72-byte secret during init; bcrypt>=4 raises instead of truncating).
+    # Pin to the 3.2.x line until passlib ships a fix.
+    "bcrypt>=3.2,<4.0",
     "cryptography>=42.0",
     "alembic>=1.13",
 ]

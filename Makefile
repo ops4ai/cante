@@ -1,4 +1,4 @@
-.PHONY: up down seed smoke test lint clean
+.PHONY: up down migrate seed smoke test lint clean logs
 
 PROFILE ?=
 
@@ -12,9 +12,13 @@ endif
 
 up:
 	$(COMPOSE_CMD) up -d --build
+	$(MAKE) migrate
 
 down:
 	$(COMPOSE_CMD) down
+
+migrate:
+	$(COMPOSE_CMD) exec api python -c "from cante.db import run_migrations_async; import asyncio; asyncio.run(run_migrations_async())"
 
 seed:
 	$(COMPOSE_CMD) exec api python -m seeds
@@ -23,10 +27,10 @@ smoke:
 	$(COMPOSE_CMD) exec api python -m tests.smoke
 
 test:
-	cd core && pytest -v --cov=cante --cov-report=term-missing
+	pytest -v --cov=cante --cov=services --cov-report=term-missing
 
 lint:
-	ruff check core/ services/ && mypy core/
+	ruff check core/ services/ && mypy core/ services/
 
 clean:
 	$(COMPOSE_CMD) down -v

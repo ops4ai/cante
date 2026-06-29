@@ -1,20 +1,24 @@
 name: cante
 
+# S4/S17: no secrets are hardcoded here — everything sensitive is read from
+# the .env file (gitignored). Published ports bind to 127.0.0.1 so the DB,
+# Redis, and services are not exposed to the public network behind the edge
+# proxy; put Cante behind a reverse proxy (Traefik/nginx) for public ingress.
 services:
   postgres:
     image: postgres:16-alpine
     container_name: cante-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: cante
-      POSTGRES_PASSWORD: cante
-      POSTGRES_DB: cante
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U cante"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -23,8 +27,12 @@ services:
     image: redis:7-alpine
     container_name: cante-redis
     restart: unless-stopped
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    # S17: require a password when REDIS_PASSWORD is set; no auth in dev when empty.
+    command: ["sh", "-c", "if [ -n \"$${REDIS_PASSWORD}\" ]; then redis-server --requirepass \"$${REDIS_PASSWORD}\"; else redis-server; fi"]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -39,12 +47,15 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     ports:
-      - "8001:8001"
+      - "127.0.0.1:8001:8001"
 
   api:
     build:
@@ -54,15 +65,15 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      - DATABASE_URL=postgresql+asyncpg://cante:cante@postgres:5432/cante
-      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
 
   worker:
     build:
@@ -72,8 +83,8 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      - DATABASE_URL=postgresql+asyncpg://cante:cante@postgres:5432/cante
-      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
     depends_on:
       postgres:
         condition: service_healthy
@@ -88,7 +99,8 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
     depends_on:
       redis:
         condition: service_healthy
@@ -101,8 +113,8 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      - DATABASE_URL=postgresql+asyncpg://cante:cante@postgres:5432/cante
-      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
     depends_on:
       postgres:
         condition: service_healthy
@@ -114,10 +126,10 @@ services:
     container_name: cante-evolution
     restart: unless-stopped
     environment:
-      - AUTHENTICATION_API_KEY=evolution-secret-key
+      - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY}
       - LANGUAGE=en
     ports:
-      - "8088:8080"
+      - "127.0.0.1:8088:8080"
 
   mock-backend:
     build:
@@ -126,7 +138,7 @@ services:
     container_name: cante-mock-backend
     restart: unless-stopped
     ports:
-      - "9000:9000"
+      - "127.0.0.1:9000:9000"
 
 volumes:
   postgres_data:

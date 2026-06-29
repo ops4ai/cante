@@ -43,6 +43,16 @@ spec:
             secretKeyRef:
               name: {{ $.Release.Name }}-secrets
               key: anthropicApiKey
+        - name: TRIGGER_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ $.Release.Name }}-secrets
+              key: triggerApiKey
+        - name: ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ $.Release.Name }}-secrets
+              key: adminPassword
         ports:
         - containerPort: {{ index $.Values.services $svc "port" }}
 {{- end }}

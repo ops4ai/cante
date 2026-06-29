@@ -36,15 +36,45 @@ class AnthropicAdapter(LLMAdapter):
     ) -> LLMResponse:
         import httpx
 
-        # Convert to Anthropic format
+        # Convert to Anthropic format. Anthropic models tool-use as content
+        # blocks: an assistant turn carries [{type: text}, {type: tool_use}];
+        # a tool result is a user turn with [{type: tool_result, tool_use_id, content}].
         system_prompt = ""
         anthropic_messages = []
         for msg in messages:
             if msg.role == "system":
                 system_prompt += msg.content + "\n"
+                continue
+
+            if msg.role == "assistant":
+                blocks: list[dict] = []
+                if msg.content:
+                    blocks.append({"type": "text", "text": msg.content})
+                for tc in msg.tool_calls or []:
+                    blocks.append(
+                        {
+                            "type": "tool_use",
+                            "id": tc.id,
+                            "name": tc.name,
+                            "input": tc.arguments,
+                        }
+                    )
+                anthropic_messages.append({"role": "assistant", "content": blocks or [{"type": "text", "text": ""}]})
+            elif msg.role == "tool":
+                anthropic_messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": msg.tool_call_id,
+                                "content": msg.content,
+                            }
+                        ],
+                    }
+                )
             else:
-                role = "assistant" if msg.role == "assistant" else "user"
-                anthropic_messages.append({"role": role, "content": msg.content})
+                anthropic_messages.append({"role": "user", "content": msg.content})
 
         anthropic_tools = [
             {

@@ -60,3 +60,5 @@ secrets:
   jwtSecret: ""
   encryptionKey: ""
   anthropicApiKey: ""
+  triggerApiKey: ""   # separate from jwtSecret; used by POST /v1/triggers
+  adminPassword: ""   # backoffice admin bootstrap password

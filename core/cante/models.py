@@ -1,17 +1,17 @@
 """All SQLAlchemy ORM models for Cante.  Every core table carries a tenant_id as multi-tenant seam."""
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, declared_attr, mapped_column, relationship
 
 from cante.db import Base
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _uuid() -> str:
@@ -21,14 +21,32 @@ def _uuid() -> str:
 SEEDED_TENANT = "00000000-0000-0000-0000-000000000001"
 
 
+class TenantScoped:
+    """Mixin: this table is isolated by ``tenant_id``.
+
+    The data-layer enforcement in :mod:`cante.tenant` requires a tenant context
+    for every SELECT against these tables (fail-closed) and stamps writes
+    server-side from that context. The column is declared here so the
+    ``with_loader_criteria`` enforcement can resolve ``cls.tenant_id`` against
+    the base during SQLAlchemy's lambda-SQL analysis.
+    """
+
+    __tenant_scoped__ = True
+
+    @declared_attr
+    @classmethod
+    def tenant_id(cls) -> Mapped[str]:
+        return mapped_column(UUID(as_uuid=False), default=SEEDED_TENANT)
+
+
 # ── Auth ──────────────────────────────────────────────────────────────
 
 
-class User(Base):
+class User(Base, TenantScoped):
     __tablename__ = "users"
 
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), default=SEEDED_TENANT)
+    # tenant_id is contributed by the TenantScoped mixin (see top of file).
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(20), default="operator")  # admin | operator
@@ -39,11 +57,11 @@ class User(Base):
 # ── LLM ───────────────────────────────────────────────────────────────
 
 
-class Provider(Base):
+class Provider(Base, TenantScoped):
     __tablename__ = "providers"
 
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), default=SEEDED_TENANT)
+    # tenant_id is contributed by the TenantScoped mixin (see top of file).
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     type: Mapped[str] = mapped_column(String(30), nullable=False)  # openai_compatible | anthropic
     base_url: Mapped[str] = mapped_column(String(500), nullable=False)
@@ -57,11 +75,11 @@ class Provider(Base):
 # ── Skills ────────────────────────────────────────────────────────────
 
 
-class Skill(Base):
+class Skill(Base, TenantScoped):
     __tablename__ = "skills"
 
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), default=SEEDED_TENANT)
+    # tenant_id is contributed by the TenantScoped mixin (see top of file).
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     preset: Mapped[str] = mapped_column(String(30), default="custom")  # operations|barber|trainer|custom
     language_default: Mapped[str] = mapped_column(String(10), default="en")
@@ -90,11 +108,11 @@ class SkillVersion(Base):
 # ── Bots ──────────────────────────────────────────────────────────────
 
 
-class Bot(Base):
+class Bot(Base, TenantScoped):
     __tablename__ = "bots"
 
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), default=SEEDED_TENANT)
+    # tenant_id is contributed by the TenantScoped mixin (see top of file).
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     type_label: Mapped[str] = mapped_column(String(50), default="custom")
     skill_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("skills.id"), nullable=False)
@@ -111,11 +129,11 @@ class Bot(Base):
 # ── Numbers & routing ─────────────────────────────────────────────────
 
 
-class Number(Base):
+class Number(Base, TenantScoped):
     __tablename__ = "numbers"
 
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), default=SEEDED_TENANT)
+    # tenant_id is contributed by the TenantScoped mixin (see top of file).
     phone: Mapped[str] = mapped_column(String(30), nullable=False)
     channel_type: Mapped[str] = mapped_column(String(30), default="whatsapp_evolution")
     connection_config: Mapped[dict] = mapped_column(JSONB, default=dict)
@@ -124,11 +142,11 @@ class Number(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
-class Route(Base):
+class Route(Base, TenantScoped):
     __tablename__ = "routes"
 
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), default=SEEDED_TENANT)
+    # tenant_id is contributed by the TenantScoped mixin (see top of file).
     number_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("numbers.id"), nullable=False)
     bot_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("bots.id"), nullable=False)
     selector: Mapped[str] = mapped_column(String(30), default="default")  # default|contact_group|keyword_prefix
@@ -143,25 +161,28 @@ class Route(Base):
 # ── Contacts ──────────────────────────────────────────────────────────
 
 
-class Contact(Base):
+class Contact(Base, TenantScoped):
     __tablename__ = "contacts"
 
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), default=SEEDED_TENANT)
+    # tenant_id is contributed by the TenantScoped mixin (see top of file).
     phone: Mapped[str] = mapped_column(String(30), nullable=False, unique=True)
     name: Mapped[str] = mapped_column(String(200), default="")
     attributes: Mapped[dict] = mapped_column(JSONB, default=dict)
     first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
-    __table_args__ = (UniqueConstraint("tenant_id", "phone", name="uq_contact_phone"),)
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "phone", name="uq_contact_phone"),
+        Index("idx_contact_last_seen", "last_seen"),
+    )
 
 
-class ContactGroup(Base):
+class ContactGroup(Base, TenantScoped):
     __tablename__ = "contact_groups"
 
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), default=SEEDED_TENANT)
+    # tenant_id is contributed by the TenantScoped mixin (see top of file).
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     number_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False), ForeignKey("numbers.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
@@ -182,11 +203,11 @@ class GroupMembership(Base):
 # ── Conversations ─────────────────────────────────────────────────────
 
 
-class Conversation(Base):
+class Conversation(Base, TenantScoped):
     __tablename__ = "conversations"
 
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), default=SEEDED_TENANT)
+    # tenant_id is contributed by the TenantScoped mixin (see top of file).
     number_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("numbers.id"), nullable=False)
     bot_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("bots.id"), nullable=False)
     contact_id: Mapped[str] = mapped_column(UUID(as_uuid=False), ForeignKey("contacts.id"), nullable=False)
@@ -197,14 +218,18 @@ class Conversation(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     last_activity_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
-    __table_args__ = (Index("idx_conv_state", "state"), Index("idx_conv_bot", "bot_id"))
+    __table_args__ = (
+        Index("idx_conv_state", "state"),
+        Index("idx_conv_bot", "bot_id"),
+        Index("idx_conv_last_activity", "last_activity_at"),
+    )
 
 
-class Message(Base):
+class Message(Base, TenantScoped):
     __tablename__ = "messages"
 
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), default=SEEDED_TENANT)
+    # tenant_id is contributed by the TenantScoped mixin (see top of file).
     conversation_id: Mapped[str] = mapped_column(
         UUID(as_uuid=False), ForeignKey("conversations.id"), nullable=False
     )
@@ -216,17 +241,19 @@ class Message(Base):
     meta: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
+    __table_args__ = (Index("idx_msg_conv_created", "conversation_id", "created_at"),)
+
     conversation = relationship("Conversation", backref="messages")
 
 
 # ── Learning ──────────────────────────────────────────────────────────
 
 
-class Learning(Base):
+class Learning(Base, TenantScoped):
     __tablename__ = "learnings"
 
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), default=SEEDED_TENANT)
+    # tenant_id is contributed by the TenantScoped mixin (see top of file).
     conversation_id: Mapped[str] = mapped_column(
         UUID(as_uuid=False), ForeignKey("conversations.id"), nullable=False
     )
@@ -237,15 +264,17 @@ class Learning(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     reviewed_by: Mapped[str | None] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True)
 
+    __table_args__ = (Index("idx_learning_created", "created_at"),)
+
 
 # ── Events / Audit / Secrets ──────────────────────────────────────────
 
 
-class Event(Base):
+class Event(Base, TenantScoped):
     __tablename__ = "events"
 
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), default=SEEDED_TENANT)
+    # tenant_id is contributed by the TenantScoped mixin (see top of file).
     type: Mapped[str] = mapped_column(String(50), nullable=False)
     bot_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False), nullable=True)
     number_id: Mapped[str | None] = mapped_column(UUID(as_uuid=False), nullable=True)
@@ -256,11 +285,11 @@ class Event(Base):
     __table_args__ = (Index("idx_events_type", "type"),)
 
 
-class AuditLog(Base):
+class AuditLog(Base, TenantScoped):
     __tablename__ = "audit_logs"
 
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), default=SEEDED_TENANT)
+    # tenant_id is contributed by the TenantScoped mixin (see top of file).
     actor: Mapped[str] = mapped_column(String(100), default="")
     action: Mapped[str] = mapped_column(String(50), nullable=False)
     entity: Mapped[str] = mapped_column(String(50), default="")
@@ -268,12 +297,14 @@ class AuditLog(Base):
     after: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
+    __table_args__ = (Index("idx_audit_created", "created_at"),)
 
-class Secret(Base):
+
+class Secret(Base, TenantScoped):
     __tablename__ = "secrets"
 
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
-    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), default=SEEDED_TENANT)
+    # tenant_id is contributed by the TenantScoped mixin (see top of file).
     name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     value_encrypted: Mapped[str] = mapped_column(Text, default="")
     env_ref: Mapped[str] = mapped_column(String(100), default="")

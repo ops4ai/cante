@@ -20,6 +20,7 @@ class Settings(BaseSettings):
 
     # ── Redis ────────────────────────────────────
     redis_url: str = "redis://redis:6379/0"
+    redis_password: str = ""  # when set, must match Redis ACL / --requirepass
 
     # ── LLM secrets (fallback — prefer providers in DB) ─
     anthropic_api_key: str = ""
@@ -29,6 +30,12 @@ class Settings(BaseSettings):
     jwt_secret: str = "change-me-in-production"
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 1440  # 24h
+    jwt_refresh_expire_days: int = 7
+    # Separate secret for the machine-to-machine /triggers endpoint. MUST be set.
+    trigger_api_key: str = ""
+
+    # ── CORS ─────────────────────────────────────
+    cors_origins: str = ""  # comma-separated; empty => same-origin only
 
     # ── Ingestion ────────────────────────────────
     wa_dedup_ttl_seconds: int = 86400  # 24h
@@ -39,6 +46,16 @@ class Settings(BaseSettings):
     circuit_breaker_failures: int = 3
     rate_limit_per_minute: int = 10
     rate_limit_per_hour: int = 60
+    # When False the worker short-circuits to an echo reply (no LLM, no DB) —
+    # useful for smoke tests / dev without a configured provider.
+    worker_llm_enabled: bool = True
+    # Per-entry redelivery: claim pending stream entries older than this (seconds)
+    # and move them to stream:dead after this many failures.
+    worker_claim_min_idle_ms: int = 60_000
+    worker_max_retries: int = 5
+    # Per-conversation debounce/claim lock TTL. Must exceed worst-case LLM latency
+    # (C14); a heartbeat renews it during the call so a slow LLM doesn't drop it.
+    worker_lock_ttl: int = 120
 
     # ── Sender ───────────────────────────────────
     send_delay_min_s: float = 3.0
