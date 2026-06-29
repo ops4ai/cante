@@ -127,7 +127,7 @@ class UnsafeUrlError(ValueError):
     """Raised when a URL is refused by the SSRF egress filter."""
 
 
-def _ip_is_blocked(ip: ipaddress.IPAddress) -> bool:
+def _ip_is_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     for blocked in _BLOCKED_PREFIXES:
         net = ipaddress.ip_network(blocked)
         # `ip in net` is version-aware (False across v4/v6); subnet_of is not.
