@@ -1,5 +1,8 @@
 """Cante sender — consumes stream:outbound, paces, sends."""
-import asyncio, signal, random, structlog
+import asyncio
+import signal
+import random
+import structlog
 from cante.bus import RedisStreamsBus
 from cante.redis import get_redis
 from cante.settings import settings

@@ -1,12 +1,15 @@
 """Cante worker — agent loop with LLM + declarative tool execution. M7 complete."""
 
-import asyncio, json, signal, structlog
+import asyncio
+import json
+import signal
+import structlog
 
 from cante.bus import RedisStreamsBus
 from cante.redis import get_redis
 from cante.security import assert_no_default_secrets
 from cante.settings import settings
-from cante.tools import DeclaredHttpTool, ToolCallResult, ToolRegistry
+from cante.tools import DeclaredHttpTool, ToolRegistry
 
 logger = structlog.get_logger(__name__)
 running = True

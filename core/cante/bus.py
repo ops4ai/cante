@@ -1,11 +1,8 @@
 """Event bus abstraction — Redis Streams implementation. Swappable to NATS/Kafka later."""
 
-import json
-import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Protocol
+from datetime import UTC, datetime
 
 import redis.exceptions
 
@@ -14,7 +11,7 @@ import redis.exceptions
 class StreamEntry:
     id: str
     data: dict
-    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 class EventBus(ABC):

@@ -1,6 +1,7 @@
 """Redis client factory — single connection for the app lifetime."""
 
 import redis.asyncio as aioredis
+
 from cante.settings import settings
 
 _redis: aioredis.Redis | None = None

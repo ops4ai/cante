@@ -1,5 +1,4 @@
 """Optional Langfuse / OpenTelemetry observability toggle."""
-import os
 from cante.settings import settings
 
 _langfuse_available = False

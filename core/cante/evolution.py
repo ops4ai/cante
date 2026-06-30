@@ -1,7 +1,8 @@
 """WhatsApp channel adapter — Evolution API implementation of ChannelAdapter."""
 
-import structlog
 from typing import Literal
+
+import structlog
 
 from cante.settings import settings
 
@@ -16,7 +17,6 @@ class EvolutionAdapter:
         self._api_key = api_key or settings.evolution_api_key
 
     async def parse_webhook(self, raw: dict) -> list:
-        from cante.channel import InboundMessage
 
         messages = []
         data = raw.get("data", raw)

@@ -1,6 +1,6 @@
 """Guard pipeline — post-generation checks, ordered, per-Bot configurable."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass

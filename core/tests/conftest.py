@@ -47,9 +47,10 @@ def _nullpool_engine():
     NullPool checks out a fresh connection per use, sidestepping the issue.
     """
     try:
-        import cante.db as _db
         from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
         from sqlalchemy.pool import NullPool
+
+        import cante.db as _db
 
         eng = create_async_engine(_db.settings.database_url, poolclass=NullPool)
         _db.engine = eng

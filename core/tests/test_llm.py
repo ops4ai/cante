@@ -1,6 +1,7 @@
 """Test LLM adapter interface and message types."""
 from cante.llm import LLMMessage, LLMResponse, LLMToolCall, LLMToolDefinition
 
+
 def test_message_creation():
     msg = LLMMessage(role="user", content="Hello")
     assert msg.role == "user"

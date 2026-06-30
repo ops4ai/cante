@@ -1,6 +1,7 @@
 """Test the guard pipeline."""
 import pytest
 
+
 @pytest.mark.asyncio
 async def test_dedup_guard_blocks_identical():
     from cante.guards import DedupGuard
