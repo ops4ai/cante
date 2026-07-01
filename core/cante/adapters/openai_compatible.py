@@ -2,6 +2,7 @@
 
 import json
 
+import httpx
 import structlog
 
 from cante.llm import (
@@ -22,6 +23,13 @@ class OpenAICompatibleAdapter(LLMAdapter):
     def __init__(self, api_key: str, base_url: str = "https://api.openai.com/v1"):
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(60.0),
+            limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+        )
+
+    async def close(self) -> None:
+        await self._client.aclose()
 
     @staticmethod
     def supports(model: str, base_url: str) -> bool:
@@ -36,11 +44,9 @@ class OpenAICompatibleAdapter(LLMAdapter):
         max_tokens: int = 4096,
         model: str = "gpt-4o",
     ) -> LLMResponse:
-        import httpx
-
         api_messages = []
         for msg in messages:
-            api_msg = {"role": msg.role, "content": msg.content}
+            api_msg: dict = {"role": msg.role, "content": msg.content}
             if msg.tool_call_id:
                 api_msg["tool_call_id"] = msg.tool_call_id
             if msg.name:
@@ -63,11 +69,18 @@ class OpenAICompatibleAdapter(LLMAdapter):
             api_messages.append(api_msg)
 
         api_tools = [
-            {"type": "function", "function": {"name": t.name, "description": t.description, "parameters": t.parameters}}
+            {
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                },
+            }
             for t in tools
         ] if tools else None
 
-        body = {
+        body: dict = {
             "model": model,
             "messages": api_messages,
             "temperature": temperature,
@@ -78,47 +91,46 @@ class OpenAICompatibleAdapter(LLMAdapter):
             body["tool_choice"] = "auto"
 
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
-                resp = await client.post(
-                    f"{self._base_url}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self._api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=body,
-                )
+            resp = await self._client.post(
+                f"{self._base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self._api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=body,
+            )
 
-                if resp.status_code == 429:
-                    raise LLMAPITimeout("Rate limited")
-                if resp.status_code >= 400:
-                    raise LLMAPIStatusError(resp.status_code, resp.text)
+            if resp.status_code == 429:
+                raise LLMAPITimeout("Rate limited")
+            if resp.status_code >= 400:
+                raise LLMAPIStatusError(resp.status_code, resp.text)
 
-                data = resp.json()
-                choice = data["choices"][0]
-                msg = choice["message"]
+            data = resp.json()
+            choice = data["choices"][0]
+            msg = choice["message"]
 
-                tool_calls = []
-                if msg.get("tool_calls"):
-                    for tc in msg["tool_calls"]:
-                        args = tc["function"]["arguments"]
-                        if isinstance(args, str):
-                            args = json.loads(args)
-                        tool_calls.append(LLMToolCall(
-                            id=tc["id"],
-                            name=tc["function"]["name"],
-                            arguments=args,
-                        ))
+            tool_calls = []
+            if msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    args = tc["function"]["arguments"]
+                    if isinstance(args, str):
+                        args = json.loads(args)
+                    tool_calls.append(LLMToolCall(
+                        id=tc["id"],
+                        name=tc["function"]["name"],
+                        arguments=args,
+                    ))
 
-                return LLMResponse(
-                    content=msg.get("content", "") or "",
-                    tool_calls=tool_calls,
-                    tokens_in=data.get("usage", {}).get("prompt_tokens", 0),
-                    tokens_out=data.get("usage", {}).get("completion_tokens", 0),
-                    model=data.get("model", model),
-                    finish_reason="tool_calls" if tool_calls else choice.get("finish_reason", "stop"),
-                )
+            return LLMResponse(
+                content=msg.get("content", "") or "",
+                tool_calls=tool_calls,
+                tokens_in=data.get("usage", {}).get("prompt_tokens", 0),
+                tokens_out=data.get("usage", {}).get("completion_tokens", 0),
+                model=data.get("model", model),
+                finish_reason="tool_calls" if tool_calls else choice.get("finish_reason", "stop"),
+            )
 
-        except httpx.TimeoutException:
-            raise LLMAPITimeout("OpenAI API timed out")
-        except httpx.ConnectError as e:
-            raise LLMAPIConnectionError(str(e))
+        except httpx.TimeoutException as err:
+            raise LLMAPITimeout("OpenAI API timed out") from err
+        except httpx.ConnectError as err:
+            raise LLMAPIConnectionError(str(err)) from err

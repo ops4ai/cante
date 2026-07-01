@@ -103,7 +103,7 @@ async def run_agent_loop(
     """Execute the agent loop with tool calling. Returns (reply, context_updates)."""
     from cante.llm import LLMMessage, LLMToolDefinition
 
-    ctx = {}
+    ctx: dict[str, object] = {}
     if llm is None or tools is None:
         return f"[Cante M1 echo] Recebi: {user_message[:400]}", ctx
 

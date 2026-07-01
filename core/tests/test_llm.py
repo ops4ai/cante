@@ -15,6 +15,10 @@ def test_llm_response_with_tools():
     assert resp.finish_reason == "tool_calls"
 
 def test_tool_definition_schema():
-    td = LLMToolDefinition(name="test", description="A test tool", parameters={"type": "object", "properties": {"x": {"type": "integer"}}})
+    td = LLMToolDefinition(
+        name="test",
+        description="A test tool",
+        parameters={"type": "object", "properties": {"x": {"type": "integer"}}},
+    )
     assert td.name == "test"
     assert td.parameters["type"] == "object"

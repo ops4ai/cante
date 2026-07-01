@@ -63,8 +63,10 @@ async def test_rejects_non_allowlisted_host():
 
 @pytest.mark.asyncio
 async def test_allows_allowlisted_public_host(monkeypatch):
-    # The URL is safe and allowlisted; stub httpx so no real request is made.
-    import httpx
+    # The URL is safe and allowlisted; stub the shared tools HTTP client so no
+    # real request is made. DeclaredHttpTool now uses a module-level long-lived
+    # client (C8).
+    from cante import tools as tools_mod
 
     class _Resp:
         is_redirect = False
@@ -82,20 +84,11 @@ async def test_allows_allowlisted_public_host(monkeypatch):
             return "ok"
 
     class _Client:
-        def __init__(self, *a, **k):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return False
-
-        async def request(self, method, url, headers=None):
+        async def request(self, method, url, headers=None, timeout=None):
             assert url == "http://8.8.8.8/"
             return _Resp()
 
-    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    monkeypatch.setattr(tools_mod, "_get_tools_http_client", lambda: _Client())
     tool = _tool("http://8.8.8.8/", allowed_hosts=["8.8.8.8"])
     result = await tool.execute({})
     assert result == {"ok": True}

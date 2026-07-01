@@ -3,11 +3,39 @@
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+import httpx
+
 
 class Tool(Protocol):
     name: str
     description: str
     parameters: dict  # JSON Schema
+
+
+# ── Shared HTTP client for DeclaredHttpTool ──────────────────────────────────
+# One long-lived client with connection pooling and redirect-following disabled
+# (each DeclaredHttpTool is always an egress call to an external API, and
+# redirect-following is a SSRF vector). The per-request timeout is passed at
+# call time from self.timeout_s.
+_tools_client: httpx.AsyncClient | None = None
+
+
+def _get_tools_http_client() -> httpx.AsyncClient:
+    global _tools_client
+    if _tools_client is None:
+        _tools_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(10.0),
+            follow_redirects=False,
+            limits=httpx.Limits(max_keepalive_connections=5, max_connections=20),
+        )
+    return _tools_client
+
+
+async def _close_tools_http_client() -> None:
+    global _tools_client
+    if _tools_client is not None:
+        await _tools_client.aclose()
+        _tools_client = None
 
 
 class BuiltinTool:
@@ -77,33 +105,37 @@ class DeclaredHttpTool:
 
         headers = dict(self.http_headers)
         # Resolve secret references: {{secret:integration_token}}
-        resolved_headers = {}
+        resolved_headers: dict[str, str] = {}
+        _secrets = secrets or {}
         for k, v in headers.items():
-            if v.startswith("{{secret:") and secrets:
+            if v.startswith("{{secret:") and _secrets:
                 secret_name = v[len("{{secret:"):-2]
-                resolved_headers[k] = secrets.get(secret_name, v)
+                resolved_headers[k] = str(_secrets.get(secret_name, v))
             else:
-                resolved_headers[k] = v
+                resolved_headers[k] = str(v)
 
         # Redirects are disabled so a safe public host cannot bounce us to an
         # internal address. A 3xx is surfaced as an error rather than followed.
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(self.timeout_s), follow_redirects=False
-        ) as client:
-            resp = await client.request(method, url, headers=resolved_headers)
-            if resp.is_redirect:
-                raise ValueError(f"DeclaredHttpTool refused redirect to {resp.headers.get('location')!r}")
-            resp.raise_for_status()
+        client = _get_tools_http_client()
+        resp = await client.request(
+            method, url, headers=resolved_headers,
+            timeout=httpx.Timeout(self.timeout_s),
+        )
+        if resp.is_redirect:
+            raise ValueError(
+                f"DeclaredHttpTool refused redirect to {resp.headers.get('location')!r}"
+            )
+        resp.raise_for_status()
 
-            # Cap response size before parsing.
-            raw = await resp.aread()
-            if len(raw) > self._MAX_RESPONSE_BYTES:
-                raise ValueError(
-                    f"DeclaredHttpTool response too large: {len(raw)} > {self._MAX_RESPONSE_BYTES} bytes"
-                )
-            if self.response_mapping == "json":
-                return resp.json()
-            return resp.text
+        # Cap response size before parsing.
+        raw = await resp.aread()
+        if len(raw) > self._MAX_RESPONSE_BYTES:
+            raise ValueError(
+                f"DeclaredHttpTool response too large: {len(raw)} > {self._MAX_RESPONSE_BYTES} bytes"
+            )
+        if self.response_mapping == "json":
+            return resp.json()
+        return resp.text
 
 
 @dataclass

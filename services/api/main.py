@@ -1,5 +1,7 @@
 """Cante API — backoffice control plane (FastAPI). Full CRUD for all entities."""
 
+from collections.abc import AsyncGenerator
+
 import structlog
 from fastapi import FastAPI, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -60,7 +62,9 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         raise HTTPException(401, "Invalid token")
 
 
-async def tenant_context(principal: Principal = Depends(get_current_user)) -> Principal:
+async def tenant_context(
+    principal: Principal = Depends(get_current_user),
+) -> AsyncGenerator[Principal, None]:
     """S1: scope the whole request to the caller's tenant (fail-closed reads/writes)."""
     with with_tenant(principal.tenant_id):
         yield principal
@@ -176,14 +180,19 @@ async def login(data: LoginIn, request: Request):
             result = await session.execute(select(User).where(User.email == data.email))
             user = result.scalar_one_or_none()
         ok = bool(user) and verify_password(data.password, user.hashed_password) if user else False
-        if not ok:
+        if not ok or user is None:
             # S7: generic message, no user enumeration.
             raise HTTPException(401, "Invalid credentials")
         access, refresh = create_token_pair(user.id, user.tenant_id, user.role)
         return {
             "access_token": access,
             "refresh_token": refresh,
-            "user": {"id": user.id, "email": user.email, "role": user.role, "tenant_id": user.tenant_id},
+            "user": {
+                "id": user.id,
+                "email": user.email,
+                "role": user.role,
+                "tenant_id": user.tenant_id,
+            },
         }
 
 
@@ -562,33 +571,50 @@ async def list_learnings(status: str = "", principal: Principal = Depends(tenant
         if status:
             stmt = stmt.where(Learning.status == status)
         result = await session.execute(stmt)
-        return [{"id": l.id, "type": l.type, "suggestion_md": l.suggestion_md[:200], "category": l.category, "status": l.status} for l in result.scalars().all()]
+        return [
+            {
+                "id": learning.id,
+                "type": learning.type,
+                "suggestion_md": learning.suggestion_md[:200],
+                "category": learning.category,
+                "status": learning.status,
+            }
+            for learning in result.scalars().all()
+        ]
 
 
 @app.post("/v1/learnings/{learning_id}/approve")
 async def approve_learning(learning_id: str, principal: Principal = Depends(tenant_context)):
     from cante.models import Learning
     async with async_session_factory() as session:
-        l = await load_owned(session, Learning, learning_id, principal)
-        before = {"status": l.status}
-        l.status = "approved"
-        l.reviewed_by = principal.user_id
-        await log_audit(session, principal, "learning.approve", f"learning:{l.id}", before=before, after={"status": l.status})
+        learning = await load_owned(session, Learning, learning_id, principal)
+        before = {"status": learning.status}
+        learning.status = "approved"
+        learning.reviewed_by = principal.user_id
+        await log_audit(
+            session, principal, "learning.approve",
+            f"learning:{learning.id}",
+            before=before, after={"status": learning.status},
+        )
         await session.commit()
-        return {"id": l.id, "status": "approved"}
+        return {"id": learning.id, "status": "approved"}
 
 
 @app.post("/v1/learnings/{learning_id}/reject")
 async def reject_learning(learning_id: str, principal: Principal = Depends(tenant_context)):
     from cante.models import Learning
     async with async_session_factory() as session:
-        l = await load_owned(session, Learning, learning_id, principal)
-        before = {"status": l.status}
-        l.status = "rejected"
-        l.reviewed_by = principal.user_id
-        await log_audit(session, principal, "learning.reject", f"learning:{l.id}", before=before, after={"status": l.status})
+        learning = await load_owned(session, Learning, learning_id, principal)
+        before = {"status": learning.status}
+        learning.status = "rejected"
+        learning.reviewed_by = principal.user_id
+        await log_audit(
+            session, principal, "learning.reject",
+            f"learning:{learning.id}",
+            before=before, after={"status": learning.status},
+        )
         await session.commit()
-        return {"id": l.id, "status": "rejected"}
+        return {"id": learning.id, "status": "rejected"}
 
 
 # ── Metrics ──────────────────────────────────────────────────────────
