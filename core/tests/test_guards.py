@@ -23,7 +23,7 @@ async def test_dedup_guard_allows_different():
 
 @pytest.mark.asyncio
 async def test_scope_guard_allows_in_scope():
-    from cante.guards import ScopeGuard, GuardContext
+    from cante.guards import GuardContext, ScopeGuard
     guard = ScopeGuard()
     ctx = GuardContext(
         user_message="What are your hours?",
@@ -36,7 +36,7 @@ async def test_scope_guard_allows_in_scope():
 
 @pytest.mark.asyncio
 async def test_scope_guard_redirects_out_of_scope():
-    from cante.guards import ScopeGuard, GuardContext
+    from cante.guards import GuardContext, ScopeGuard
     guard = ScopeGuard()
     ctx = GuardContext(
         user_message="What is the meaning of life?",

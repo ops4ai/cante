@@ -1,6 +1,7 @@
 """Cante API — backoffice control plane (FastAPI). Full CRUD for all entities."""
 
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 
 import structlog
 from fastapi import FastAPI, Depends, HTTPException, Request
@@ -25,7 +26,22 @@ from cante.settings import settings
 from cante.tenant import with_bypass, with_tenant
 
 logger = structlog.get_logger(__name__)
-app = FastAPI(title="Cante API", version="0.1.0")
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Startup: enforce no-default-secrets + run migrations. Shutdown: no-op."""
+    assert_no_default_secrets()
+    try:
+        await run_migrations_async()
+        logger.info("api.migrations_applied")
+    except Exception as e:  # pragma: no cover - startup logging only
+        logger.error("api.migration_failed", error=str(e))
+        raise
+    yield
+
+
+app = FastAPI(title="Cante API", version="0.1.0", lifespan=lifespan)
 # S8: CORS origins come from env (comma-separated); empty => same-origin only.
 _cors_origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()] if settings.cors_origins else []
 app.add_middleware(
@@ -36,23 +52,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 security = HTTPBearer()
-
-
-@app.on_event("startup")
-async def _enforce_startup_guard() -> None:
-    """S4: refuse to boot while any secret is still a shipped default / empty."""
-    assert_no_default_secrets()
-
-
-@app.on_event("startup")
-async def _run_migrations_on_startup() -> None:
-    """Ensure the DB schema exists before serving traffic (C1)."""
-    try:
-        await run_migrations_async()
-        logger.info("api.migrations_applied")
-    except Exception as e:  # pragma: no cover - startup logging only
-        logger.error("api.migration_failed", error=str(e))
-        raise
 
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> Principal:

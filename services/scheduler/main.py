@@ -11,7 +11,7 @@ import signal
 import uuid
 
 import structlog
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
 
 from cante.redis import get_redis
 

@@ -35,16 +35,13 @@ _SEEDED_TENANT = "00000000-0000-0000-0000-000000000001"
 
 
 def _run_async(coro):
-    """Run *coro* to completion even when an event loop is already running.
+    """Run *coro* to completion in a fresh event loop on a worker thread.
 
-    pytest-asyncio keeps a loop alive for the session, so the sync DB helpers
-    (pg reset, truncate, reachability ping) can't use ``asyncio.run`` directly —
-    fall back to a worker thread with its own fresh loop in that case.
+    Always uses a thread so that nested ``asyncio.run`` calls (e.g. from
+    ``run_migrations`` → ``migrations/env.py``) don't hit "cannot be called
+    from a running event loop" when this is invoked inside the auto-recovery
+    path of ``_isolate_db``.
     """
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
     import concurrent.futures
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
@@ -123,19 +120,48 @@ def _isolate_db(pg):
 
     Never touches ``alembic_version`` — clearing it makes the next migration
     think the DB is unmigrated and re-run CREATE TABLE (DuplicateTableError).
+
+    If a destructive test (e.g. migration tests) dropped the schema, this
+    fixture auto-recovers by re-running migrations outside the async loop
+    (so the nested ``asyncio.run`` in ``migrations/env.py`` gets a fresh loop)
+    and then retries the truncate.
     """
     import asyncpg
 
+    from cante.db import run_migrations
     from cante.settings import settings
 
-    async def _truncate() -> None:
+    _TRUNCATE_SQL = (
+        "TRUNCATE TABLE users, providers, skills, skill_versions, bots, numbers, "
+        "routes, contacts, contact_groups, group_memberships, conversations, "
+        "messages, learnings, events, audit_logs, secrets RESTART IDENTITY CASCADE"
+    )
+
+    async def _truncate(retry: bool = True) -> None:
         conn = await asyncpg.connect(settings.database_url.replace("+asyncpg", ""))
-        await conn.execute(
-            "TRUNCATE TABLE users, providers, skills, skill_versions, bots, numbers, "
-            "routes, contacts, contact_groups, group_memberships, conversations, "
-            "messages, learnings, events, audit_logs, secrets RESTART IDENTITY CASCADE"
-        )
-        await conn.close()
+        try:
+            await conn.execute(_TRUNCATE_SQL)
+        except asyncpg.exceptions.UndefinedTableError:
+            await conn.close()
+            if retry:
+                # Schema was dropped by a destructive test, but alembic_version
+                # may still have the head revision (e.g. `pg` fixture re-created
+                # just that one table). Nuke it so `run_migrations` applies from
+                # scratch.
+                conn2 = await asyncpg.connect(settings.database_url.replace("+asyncpg", ""))
+                try:
+                    await conn2.execute("DELETE FROM alembic_version")
+                except Exception:
+                    pass  # table might not exist either
+                await conn2.close()
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                    ex.submit(run_migrations).result()
+                await _truncate(retry=False)
+            else:
+                raise
+        else:
+            await conn.close()
 
     _run_async(_truncate())
 

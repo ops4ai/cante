@@ -109,12 +109,13 @@ class EvolutionAdapter:
         instance = number_config.get("instance", number_config.get("phone", ""))
         url = f"{self._base_url}/chat/sendPresence/{instance}"
 
-        await self._client.post(
+        resp = await self._client.post(
             url,
             headers={"apikey": self._api_key, "Content-Type": "application/json"},
             json={"number": f"{to}@s.whatsapp.net", "presence": state},
             timeout=httpx.Timeout(10.0),
         )
+        resp.raise_for_status()
 
     async def connect(self, number_config: dict):
         from cante.channel import ConnectResult

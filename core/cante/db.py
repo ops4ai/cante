@@ -43,11 +43,28 @@ def _alembic_cfg():
     return cfg
 
 
-def run_migrations() -> None:
-    """Apply all Alembic migrations up to head. Sync — safe to call from CLI/scripts."""
+def _run_migrations_sync() -> None:
+    """Run ``command.upgrade`` — always safe regardless of the calling thread."""
     from alembic import command
-
     command.upgrade(_alembic_cfg(), "head")
+
+
+def run_migrations() -> None:
+    """Apply all Alembic migrations up to head.
+
+    When called from within a running event loop, ``command.upgrade`` is
+    dispatched to a fresh thread so the ``asyncio.run`` inside
+    ``migrations/env.py`` gets its own loop.
+    """
+    import concurrent.futures
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        _run_migrations_sync()
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            ex.submit(_run_migrations_sync).result()
 
 
 async def run_migrations_async() -> None:
