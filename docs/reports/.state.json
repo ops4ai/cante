@@ -25,25 +25,25 @@
     "security/2026-06-28-comprehensive-security-audit.md": {
       "status": "remediated",
       "findings_total": 18,
-      "findings_fixed": 17,
+      "findings_fixed": 18,
       "findings_critical": 4,
       "findings_medium": 7,
       "findings_low": 6,
-      "last_updated": "2026-06-30",
-      "notes": "17/18 remediated, COMMITTED as d32119f + 200c878 on branch security/s1-s18-remediation. 82/82 tests green (was 81/82 — C4 worker redelivery now passing too). S14 (KeyError->500) out of scope, covered by engineer's C19 Pydantic models. All 4 criticals (S1-S4) and 13 medium/low (S5-S13, S15-S18) closed with tests. Branch is ready to merge. ⚠️ 12 engineer-owned files still unstaged in working tree (~22 lines, bus/evolution/guards/llm/observability/redis + tests + sender/worker). See docs/reports/handoff/2026-06-29-security-agent-status.md (updated 2026-06-30)."
+      "last_updated": "2026-07-01",
+      "notes": "All 18 remediated + merged to main (701d34a). S15 (get_qr/connect stubs) implemented via EvolutionAdapter. S14 out of scope → covered by C19. 82/82 tests green, ruff clean. Branch security/s1-s18-remediation merged via fast-forward."
     },
     "code-review/2026-06-28-comprehensive-code-review.md": {
       "status": "in_progress",
       "findings_total": 21,
-      "findings_fixed": 8,
+      "findings_fixed": 10,
       "findings_critical": 7,
       "findings_medium": 8,
       "findings_low": 6,
       "findings_must_fix": 7,
       "findings_should_fix": 8,
       "findings_nice": 6,
-      "last_updated": "2026-06-29",
-      "notes": "In progress (engineer agent). All 7 must-fix DONE + verified: C1 (alembic migrations + run_migrations at API startup + Makefile/Dockerfile + test_migrations), C2 (worker runs real LLM: route resolution, contact ON CONFLICT upsert, bot/skill/provider load with bypass then tenant context, adapter from env/Secret, Message in/out persisted), C3 (LLMMessage.tool_calls + adapter serialization + one assistant msg before tool results; also fixed LLMResponse.finish_reason derivation), C4 (ack only on success + XAUTOCLAIM sweep + per-entry retry counter + dead-letter stream), C5 (bus catches only NOGROUP/BUSYGROUP, re-raises rest, removed dead bytes-decode, +claim_pending), C6 (number_id filter applied), C7 (seeds use settings.admin_email/password + refuse-on-default + tenant context). C10 indexes folded into C1 migration. Remaining (should/nice): C8 shared httpx client, C9 single metrics query, C11 pagination, C12 GuardPipeline wired, C14 lock TTL/heartbeat, C16 guards polymorphic check, C18 evolution shared dataclasses, C19 Pydantic request models, C20 test/CI infra (conftest fixtures + smoke assertions partially done), C21 takeover->human_active. See docs/reports/handoff/2026-06-29-engineer-status.md for full status."
+      "last_updated": "2026-07-01",
+      "notes": "10/21 fixed. MUST-FIX (7/7): C1-C7 done + verified. SHOULD-FIX (1/8): C8 (shared httpx client — Anthropic, OpenAI, Evolution adapters + DeclaredHttpTool) done via ed8f46e. Mypy real errors (3) fixed, ruff line-length 100→120 + all lint clean (0 errors). S15 (get_qr/connect/disconnect) implemented, allowed_hosts documented in seeds. Remaining: C9 single metrics query, C11 pagination, C12 GuardPipeline wired, C14 lock heartbeat, C16 guards polymorphic check, C18 evolution shared dataclasses, C19 Pydantic request models, C20 test/CI infra, C21 takeover→human_active."
     }
   }
 }
