@@ -26,6 +26,9 @@ build/
 # Data / runtime
 data/
 *.log
+.coverage
+.coverage.*
+htmlcov/
 
 # Reports — keep locally until ready to publish
 docs/reports/

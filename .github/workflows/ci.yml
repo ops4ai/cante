@@ -40,6 +40,12 @@ jobs:
       - name: Install core
         run: pip install -e core
 
+      - name: Install services runtime deps
+        # core/pyproject covers the shared deps; services/ additionally needs
+        # fastapi/uvicorn/apscheduler (see services/*/Dockerfile). Without these
+        # the API tests error with ModuleNotFoundError and coverage drops <50%.
+        run: pip install fastapi uvicorn apscheduler
+
       - name: Install dev deps
         run: pip install pytest pytest-asyncio pytest-cov ruff mypy httpx fakeredis
 
