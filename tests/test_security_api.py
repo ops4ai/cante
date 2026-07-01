@@ -285,3 +285,202 @@ async def test_refresh_rotation_revokes_old(app, admin_token):
         # Reuse the old refresh → revoked → 401.
         r2 = await client.post("/v1/auth/refresh", json={"refresh_token": refresh})
     assert r2.status_code == 401
+
+
+# ── Provider test-connection endpoint (POST /v1/providers/{id}/test) ──────────
+
+
+@pytest.mark.asyncio
+async def test_provider_test_requires_admin(app):
+    """An operator cannot use the provider test endpoint (403)."""
+    import httpx
+
+    token = await _operator_token()
+    fake_id = "00000000-0000-0000-0000-000000000099"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        r = await client.post(
+            f"/v1/providers/{fake_id}/test",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert r.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_provider_test_not_found(app, admin_token):
+    """A non-existent provider ID returns 404."""
+    import httpx
+
+    fake_id = "00000000-0000-0000-0000-000000000099"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        r = await client.post(
+            f"/v1/providers/{fake_id}/test",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+    assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_provider_test_empty_key(app, admin_token):
+    """A provider whose API key env var is unset returns ok:false immediately."""
+    import httpx
+    from cante.db import async_session_factory
+    from cante.models import Provider
+    from cante.tenant import with_tenant
+    from sqlalchemy import select
+
+    async with async_session_factory() as session:
+        with with_tenant(TENANT_A):
+            p = Provider(
+                name="Empty Key Provider",
+                type="openai_compatible",
+                base_url="https://api.openai.com/v1",
+                model="gpt-4o-mini",
+                api_key_ref="THIS_ENV_VAR_DOES_NOT_EXIST",
+            )
+            session.add(p)
+            await session.commit()
+            pid = p.id
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        r = await client.post(
+            f"/v1/providers/{pid}/test",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is False
+    assert "API key not configured" in data["error"]
+
+
+@pytest.mark.asyncio
+async def test_provider_test_unreachable_url(app, admin_token, monkeypatch):
+    """An unreachable base_url returns ok:false with a connection error hint."""
+    import httpx
+    from cante.db import async_session_factory
+    from cante.models import Provider
+    from cante.tenant import with_tenant
+
+    monkeypatch.setenv("UNREACHABLE_PROVIDER_KEY", "sk-unreachable-test")
+
+    async with async_session_factory() as session:
+        with with_tenant(TENANT_A):
+            p = Provider(
+                name="Unreachable Provider",
+                type="openai_compatible",
+                base_url="https://127.0.0.1:19999/v1",
+                model="gpt-4o-mini",
+                api_key_ref="UNREACHABLE_PROVIDER_KEY",
+            )
+            session.add(p)
+            await session.commit()
+            pid = p.id
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        r = await client.post(
+            f"/v1/providers/{pid}/test",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is False
+    assert "hint" in data
+
+
+@pytest.mark.asyncio
+async def test_provider_test_invalid_key(app, admin_token, monkeypatch):
+    """A bogus API key against a real endpoint returns ok:false with 401 hint."""
+    import httpx
+    from cante.db import async_session_factory
+    from cante.models import Provider
+    from cante.tenant import with_tenant
+
+    monkeypatch.setenv("BOGUS_PROVIDER_KEY", "not-a-valid-api-key-at-all")
+
+    async with async_session_factory() as session:
+        with with_tenant(TENANT_A):
+            p = Provider(
+                name="Bogus Key Provider",
+                type="openai_compatible",
+                base_url="https://api.openai.com/v1",
+                model="gpt-4o-mini",
+                api_key_ref="BOGUS_PROVIDER_KEY",
+            )
+            session.add(p)
+            await session.commit()
+            pid = p.id
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        r = await client.post(
+            f"/v1/providers/{pid}/test",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is False
+    # A real OpenAI endpoint returns 401 for a bogus key.
+    assert "error" in data
+
+
+@pytest.mark.asyncio
+async def test_provider_test_valid(app, admin_token):
+    """If ANTHROPIC_API_KEY is set, test a live provider and get ok:true."""
+    import os
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        pytest.skip("ANTHROPIC_API_KEY not set — cannot run live provider test")
+
+    import httpx
+    from cante.db import async_session_factory
+    from cante.models import Provider
+    from cante.tenant import with_tenant
+    from sqlalchemy import select
+
+    async with async_session_factory() as session:
+        with with_tenant(TENANT_A):
+            existing = (
+                await session.execute(
+                    select(Provider).where(Provider.name == "Test Anthropic")
+                )
+            ).scalar_one_or_none()
+            if not existing:
+                session.add(
+                    Provider(
+                        name="Test Anthropic",
+                        type="anthropic",
+                        base_url="https://api.anthropic.com/v1",
+                        model="claude-sonnet-4-20250514",
+                        api_key_ref="ANTHROPIC_API_KEY",
+                    )
+                )
+            await session.commit()
+            pid = (
+                await session.execute(
+                    select(Provider).where(Provider.name == "Test Anthropic")
+                )
+            ).scalar_one().id
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        r = await client.post(
+            f"/v1/providers/{pid}/test",
+            headers={"Authorization": f"Bearer {admin_token}"},
+            timeout=30,
+        )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is True
+    assert data["latency_ms"] > 0
+    assert data["tokens_in"] > 0
+    assert data["tokens_out"] > 0

@@ -596,6 +596,92 @@ async def create_provider(data: ProviderCreateIn, principal: Principal = Depends
         return {"id": p.id, "name": p.name, "type": p.type}
 
 
+@app.post("/v1/providers/{provider_id}/test")
+async def test_provider(provider_id: str, principal: Principal = Depends(RequireRole("admin"))):
+    """Test connectivity to a provider's LLM with a minimal API call.
+
+    Sends a single message ("Hi") with ``max_tokens=10``, ``temperature=0``.
+    Returns ``{ok: true, model, latency_ms, tokens_in, tokens_out}`` on success,
+    or ``{ok: false, error, hint}`` with a human-readable hint on failure.
+    """
+    from cante.db import build_provider_adapter, resolve_provider_api_key
+    from cante.llm import LLMAPIConnectionError, LLMAPIStatusError, LLMAPITimeout, LLMMessage
+    from cante.models import Provider
+    import time as _time
+
+    async with async_session_factory() as session:
+        provider = await load_owned(session, Provider, provider_id, principal)
+
+        api_key = await resolve_provider_api_key(provider, session)
+        if not api_key:
+            return {
+                "ok": False,
+                "error": "API key not configured",
+                "hint": (
+                    f"Set the environment variable '{provider.api_key_ref}' "
+                    f"or create a Secret named '{provider.api_key_ref}'."
+                ),
+            }
+
+        adapter = build_provider_adapter(provider, api_key)
+        try:
+            start = _time.monotonic()
+            resp = await adapter.complete(
+                messages=[LLMMessage(role="user", content="Hi")],
+                tools=[],
+                temperature=0,
+                max_tokens=10,
+                model=provider.model,
+            )
+            elapsed_ms = round((_time.monotonic() - start) * 1000)
+            return {
+                "ok": True,
+                "model": resp.model or provider.model,
+                "latency_ms": elapsed_ms,
+                "tokens_in": resp.tokens_in,
+                "tokens_out": resp.tokens_out,
+            }
+        except LLMAPIConnectionError as exc:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "hint": (
+                    "Could not reach the provider. Check that the base URL is "
+                    "correct and the server is reachable from this network."
+                ),
+            }
+        except LLMAPITimeout as exc:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "hint": (
+                    "The request timed out. The provider may be slow or a "
+                    "firewall may be blocking the connection."
+                ),
+            }
+        except LLMAPIStatusError as exc:
+            if exc.status_code in (401, 403):
+                hint = "Invalid API key. Verify the key is correct and has not expired."
+            elif exc.status_code == 404:
+                hint = "Endpoint not found. Check that the base URL is correct (e.g. OpenRouter needs /api/v1, OpenAI needs /v1)."
+            elif exc.status_code == 429:
+                hint = "Rate limited by the provider. Try again later."
+            else:
+                hint = f"Unexpected HTTP {exc.status_code}. Check the provider configuration."
+            return {"ok": False, "error": str(exc), "hint": hint}
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "hint": "An unexpected error occurred. Check the provider configuration.",
+            }
+        finally:
+            try:
+                await adapter.close()
+            except Exception:
+                pass  # best-effort cleanup
+
+
 # ── Routes ──────────────────────────────────────────────────────────
 
 @app.get("/v1/routes")

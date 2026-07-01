@@ -65,7 +65,7 @@ async def test_worker_runs_llm_and_persists_messages(pg, redis_client, monkeypat
     await _seed_route()
 
     fake = _FakeAdapter()
-    monkeypatch.setattr(w, "_build_adapter", lambda provider, api_key: fake)
+    monkeypatch.setattr(w, "build_provider_adapter", lambda provider, api_key: fake)
 
     bus = w.RedisStreamsBus(redis_client)
     await bus.create_group(w.S_IN, w.GROUP)

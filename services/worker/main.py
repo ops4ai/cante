@@ -5,6 +5,7 @@ import json
 import signal
 import structlog
 
+from cante.db import build_provider_adapter, resolve_provider_api_key
 from cante.bus import RedisStreamsBus
 from cante.redis import get_redis
 from cante.security import assert_no_default_secrets
@@ -148,37 +149,6 @@ async def run_agent_loop(
     return "Vou pedir a um humano para continuar esta conversa.", {"_escalated": True}
 
 
-async def _resolve_api_key(provider, session) -> str:
-    """Resolve a provider's API key: env var named by api_key_ref, else a Secret+decrypt."""
-    import os
-
-    env_val = os.environ.get(provider.api_key_ref, "")
-    if env_val:
-        return env_val
-    # Look up a Secret row by name and decrypt at rest.
-    from cante.models import Secret
-    from cante.secrets import decrypt
-    from sqlalchemy import select
-
-    secret = (
-        await session.execute(select(Secret).where(Secret.name == provider.api_key_ref))
-    ).scalar_one_or_none()
-    if secret and secret.value_encrypted:
-        return decrypt(secret.value_encrypted)
-    if secret and secret.env_ref:
-        return os.environ.get(secret.env_ref, "")
-    return ""
-
-
-def _build_adapter(provider, api_key: str):
-    """Instantiate the provider's LLM adapter."""
-    from cante.adapters import AnthropicAdapter, OpenAICompatibleAdapter
-
-    if provider.type == "anthropic" or AnthropicAdapter.supports(provider.model, provider.base_url):
-        return AnthropicAdapter(api_key=api_key, base_url=provider.base_url or None)
-    return OpenAICompatibleAdapter(api_key=api_key, base_url=provider.base_url)
-
-
 async def _resolve_route(from_phone: str, number_phone: str):
     """Resolve the routing for an inbound message.
 
@@ -217,7 +187,7 @@ async def _resolve_route(from_phone: str, number_phone: str):
                 return None
             skill = (await session.execute(select(Skill).where(Skill.id == bot.skill_id))).scalar_one()
             provider = (await session.execute(select(Provider).where(Provider.id == bot.provider_id))).scalar_one()
-            api_key = await _resolve_api_key(provider, session)
+            api_key = await resolve_provider_api_key(provider, session)
 
         tenant_id = bot.tenant_id or "00000000-0000-0000-0000-000000000001"
         with with_tenant(tenant_id):
@@ -310,7 +280,7 @@ async def process(entry, bus, redis):
                 await _persist_message(conv_id, tenant_id, "in", "user", body)
                 # Build tools + adapter OUTSIDE any DB session (GOTCHAS §1).
                 tools = _build_tools(skill.tools)
-                llm = _build_adapter(provider, api_key)
+                llm = build_provider_adapter(provider, api_key)
                 reply, ctx_updates = await run_agent_loop(
                     body, llm, tools, system_prompt=skill.playbook_md or None
                 )

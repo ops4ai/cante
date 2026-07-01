@@ -23,7 +23,7 @@ Or at the skill level (fallback for every declared tool in that skill)::
 Without ``allowed_hosts``, tools can only reach public internet hosts
 that pass the default is_safe_url checks.
 """
-import asyncio, os, sys
+import asyncio, json, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 async def seed():
@@ -54,15 +54,40 @@ async def seed():
                 session.add(User(email=admin_email, hashed_password=hash_password(admin_password), role="admin"))
                 print("✓ Admin user created")
 
-            # Demo provider (uses ANTHROPIC_API_KEY from env)
-            existing = (await session.execute(select(Provider).where(Provider.name == "Claude (Anthropic)"))).scalar_one_or_none()
-            if not existing:
-                session.add(Provider(
-                    name="Claude (Anthropic)", type="anthropic", base_url="https://api.anthropic.com/v1",
-                    model="claude-sonnet-4-20250514", api_key_ref="ANTHROPIC_API_KEY",
-                    params={"temperature": 0.7, "max_tokens": 4096},
-                ))
-                print("✓ Demo provider created")
+            # ── Providers (from PROVIDER_N_* .env slots) ──────────────────────
+            # Each slot defines name, type, base_url, model, and a KEY that names
+            # the env var holding the actual API key. Slots whose key is empty or
+            # unset are skipped gracefully.
+            created_any = False
+            for i in range(1, 6):
+                name = os.environ.get(f"PROVIDER_{i}_NAME", "")
+                if not name:
+                    continue
+                type_ = os.environ.get(f"PROVIDER_{i}_TYPE", "")
+                base_url = os.environ.get(f"PROVIDER_{i}_BASE_URL", "")
+                model = os.environ.get(f"PROVIDER_{i}_MODEL", "")
+                key_env_var = os.environ.get(f"PROVIDER_{i}_KEY", "")
+                if not key_env_var:
+                    print(f"  Provider {name}: PROVIDER_{i}_KEY not set — skipping")
+                    continue
+                if not os.environ.get(key_env_var, ""):
+                    print(f"  Provider {name}: env var {key_env_var} is empty — skipping")
+                    continue
+                params_json = os.environ.get(f"PROVIDER_{i}_PARAMS", "")
+                params = json.loads(params_json) if params_json else {}
+
+                existing = (await session.execute(
+                    select(Provider).where(Provider.name == name)
+                )).scalar_one_or_none()
+                if not existing:
+                    session.add(Provider(
+                        name=name, type=type_, base_url=base_url,
+                        model=model, api_key_ref=key_env_var, params=params,
+                    ))
+                    created_any = True
+                    print(f"✓ Provider {name} ({type_}, {model})")
+            if not created_any:
+                print("  No providers configured — set PROVIDER_1_NAME .. PROVIDER_5_KEY in .env")
 
             # Preset: Operations (default triage/FAQ assistant)
             existing = (await session.execute(select(Skill).where(Skill.name == "Operations (Default)"))).scalar_one_or_none()
@@ -108,6 +133,59 @@ async def seed():
                     escalation={"on":["explicit_request"],"message":"Let me get the coach to help you directly."},
                 ))
                 print("✓ Trainer skill created")
+
+            # ── Demo Bot + Number + Route (optional) ─────────────────────────
+            demo_number = os.environ.get("SEED_DEMO_NUMBER", "")
+            demo_provider = os.environ.get("SEED_DEMO_PROVIDER", "")
+            if demo_number and demo_provider:
+                ops_skill = (await session.execute(
+                    select(Skill).where(Skill.name == "Operations (Default)")
+                )).scalar_one_or_none()
+                provider = (await session.execute(
+                    select(Provider).where(Provider.name == demo_provider)
+                )).scalar_one_or_none()
+                if ops_skill and provider:
+                    # Number
+                    num = (await session.execute(
+                        select(Number).where(Number.phone == demo_number)
+                    )).scalar_one_or_none()
+                    if not num:
+                        num = Number(phone=demo_number, display_name="Demo Number")
+                        session.add(num)
+                        await session.flush()
+                        print(f"✓ Demo Number ({demo_number})")
+
+                    # Bot
+                    bot = (await session.execute(
+                        select(Bot).where(Bot.name == "Demo Bot")
+                    )).scalar_one_or_none()
+                    if not bot:
+                        bot = Bot(
+                            name="Demo Bot", skill_id=ops_skill.id,
+                            provider_id=provider.id,
+                        )
+                        session.add(bot)
+                        await session.flush()
+                        print(f"✓ Demo Bot → Provider: {demo_provider}")
+
+                    # Route
+                    route = (await session.execute(
+                        select(Route).where(
+                            Route.number_id == num.id,
+                            Route.bot_id == bot.id,
+                        )
+                    )).scalar_one_or_none()
+                    if not route:
+                        session.add(Route(
+                            number_id=num.id, bot_id=bot.id,
+                            selector="default", priority=0,
+                        ))
+                        print("✓ Demo Route (Number → Bot)")
+                else:
+                    if not ops_skill:
+                        print("  Demo skipped: skill 'Operations (Default)' not found")
+                    if not provider:
+                        print(f"  Demo skipped: provider '{demo_provider}' not found")
 
             await session.commit()
         print(f"\nSeed complete. Login: {admin_email} / (ADMIN_PASSWORD from .env)")

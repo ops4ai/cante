@@ -80,3 +80,48 @@ async def init_db() -> None:
     """Dev helper: create all tables from the ORM metadata (no Alembic needed)."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+
+# ── Provider helpers (shared by worker + API) ─────────────────────────────────
+
+
+async def resolve_provider_api_key(provider, session) -> str:
+    """Resolve a provider's API key: env var named by *api_key_ref*, else a
+    Secret row (decrypted at rest), else the Secret's *env_ref* indirection.
+
+    Returns ``""`` when nothing is configured — callers should surface a clear
+    error rather than making an API call with an empty key.
+    """
+    import os
+
+    env_val = os.environ.get(provider.api_key_ref, "")
+    if env_val:
+        return env_val
+    # Look up a Secret row by name and decrypt at rest.
+    from cante.models import Secret
+    from cante.secrets import decrypt
+    from sqlalchemy import select
+
+    secret = (
+        await session.execute(select(Secret).where(Secret.name == provider.api_key_ref))
+    ).scalar_one_or_none()
+    if secret and secret.value_encrypted:
+        return decrypt(secret.value_encrypted)
+    if secret and secret.env_ref:
+        return os.environ.get(secret.env_ref, "")
+    return ""
+
+
+def build_provider_adapter(provider, api_key: str):
+    """Instantiate the right LLM adapter for *provider*.
+
+    Returns an ``AnthropicAdapter`` when *provider.type* is ``"anthropic"``
+    (or the model / base_url otherwise matches Anthropic patterns), otherwise
+    an ``OpenAICompatibleAdapter`` (covers OpenAI, DeepSeek, OpenRouter, Groq,
+    LiteLLM, and any other OpenAI-compatible API).
+    """
+    from cante.adapters import AnthropicAdapter, OpenAICompatibleAdapter
+
+    if provider.type == "anthropic" or AnthropicAdapter.supports(provider.model, provider.base_url):
+        return AnthropicAdapter(api_key=api_key, base_url=provider.base_url or None)
+    return OpenAICompatibleAdapter(api_key=api_key, base_url=provider.base_url)
