@@ -1,4 +1,28 @@
-"""Seed the database with demo data: admin user, Operations bot, 3 preset skills, demo provider."""
+"""Seed the database with demo data: admin user, Operations bot, 3 preset skills, demo provider.
+
+Declared HTTP tools and the ``allowed_hosts`` field
+----------------------------------------------------
+Every declared HTTP tool runs through an SSRF egress filter
+(``is_safe_url`` in ``cante.security``). The filter blocks requests to
+internal / loopback / link-local / metadata addresses **unless** the
+target host is explicitly listed in ``allowed_hosts``.
+
+Configure ``allowed_hosts`` at the tool level::
+
+    {
+      "name": "get_open_slots",
+      "http": { "method": "GET", "url": "http://mock-backend:9000/...",
+                "allowed_hosts": ["mock-backend"] }
+    }
+
+Or at the skill level (fallback for every declared tool in that skill)::
+
+    { "tools": { "builtin": [...], "declared": [...],
+                 "allowed_hosts": ["mock-backend"] } }
+
+Without ``allowed_hosts``, tools can only reach public internet hosts
+that pass the default is_safe_url checks.
+"""
 import asyncio, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -62,8 +86,8 @@ async def seed():
                     playbook_md="## Who you are\nYou are the front desk of a barber shop. You help customers book, cancel, and inquire about appointments.\n\n## What you can do\n- Check available slots\n- Book appointments\n- Cancel appointments\n- Answer questions about services and prices\n\n## Tone\nCasual, friendly, like a neighborhood barber.",
                     guardrails_md="Only discuss appointments, services, hours, prices, and location. Politely refuse anything else.",
                     tools={"builtin": ["lookup_or_create_contact","close_conversation","escalate_to_human"], "declared": [
-                        {"name":"get_open_slots","description":"Check available appointment slots for a date","input_schema":{"type":"object","properties":{"date":{"type":"string"}},"required":["date"]},"http":{"method":"GET","url":"http://mock-backend:9000/availability?date={date}","headers":{},"timeout_s":10},"response_mapping":"json"},
-                        {"name":"book_appointment","description":"Book an appointment","input_schema":{"type":"object","properties":{"date":{"type":"string"},"time":{"type":"string"},"name":{"type":"string"}},"required":["date","time","name"]},"http":{"method":"POST","url":"http://mock-backend:9000/appointments","headers":{"Content-Type":"application/json"},"timeout_s":10},"response_mapping":"json"},
+                        {"name":"get_open_slots","description":"Check available appointment slots for a date","input_schema":{"type":"object","properties":{"date":{"type":"string"}},"required":["date"]},"http":{"method":"GET","url":"http://mock-backend:9000/availability?date={date}","headers":{},"timeout_s":10,"allowed_hosts":["mock-backend"]},"response_mapping":"json"},
+                        {"name":"book_appointment","description":"Book an appointment","input_schema":{"type":"object","properties":{"date":{"type":"string"},"time":{"type":"string"},"name":{"type":"string"}},"required":["date","time","name"]},"http":{"method":"POST","url":"http://mock-backend:9000/appointments","headers":{"Content-Type":"application/json"},"timeout_s":10,"allowed_hosts":["mock-backend"]},"response_mapping":"json"},
                     ]},
                     done_condition="An appointment is confirmed.",
                     escalation={"on":["explicit_request"],"message":"Let me transfer you to the barber."},
@@ -77,8 +101,8 @@ async def seed():
                     name="Youth Sports Trainer", preset="trainer", language_default="en",
                     playbook_md="## Who you are\nYou are a youth sports coach's assistant. You help parents with schedules, absences, and game info.\n\n## What you can do\n- Check the game schedule\n- Report a player's absence\n- Send messages to parents\n\n## Tone\nEncouraging, clear, team-spirited.",
                     tools={"builtin": ["lookup_or_create_contact","close_conversation","escalate_to_human"], "declared": [
-                        {"name":"get_schedule","description":"Get the team game schedule","input_schema":{"type":"object","properties":{"team":{"type":"string"}},"required":["team"]},"http":{"method":"GET","url":"http://mock-backend:9000/schedule?team={team}","headers":{},"timeout_s":10},"response_mapping":"json"},
-                        {"name":"report_absence","description":"Report a player's absence","input_schema":{"type":"object","properties":{"player_name":{"type":"string"},"date":{"type":"string"},"reason":{"type":"string"}},"required":["player_name","date"]},"http":{"method":"POST","url":"http://mock-backend:9000/absences","headers":{"Content-Type":"application/json"},"timeout_s":10},"response_mapping":"json"},
+                        {"name":"get_schedule","description":"Get the team game schedule","input_schema":{"type":"object","properties":{"team":{"type":"string"}},"required":["team"]},"http":{"method":"GET","url":"http://mock-backend:9000/schedule?team={team}","headers":{},"timeout_s":10,"allowed_hosts":["mock-backend"]},"response_mapping":"json"},
+                        {"name":"report_absence","description":"Report a player's absence","input_schema":{"type":"object","properties":{"player_name":{"type":"string"},"date":{"type":"string"},"reason":{"type":"string"}},"required":["player_name","date"]},"http":{"method":"POST","url":"http://mock-backend:9000/absences","headers":{"Content-Type":"application/json"},"timeout_s":10,"allowed_hosts":["mock-backend"]},"response_mapping":"json"},
                     ]},
                     done_condition="The parent's question is answered or the absence is reported.",
                     escalation={"on":["explicit_request"],"message":"Let me get the coach to help you directly."},
