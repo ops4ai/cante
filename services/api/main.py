@@ -102,6 +102,58 @@ async def load_owned(session, model, obj_id: str, principal: Principal):
     return obj
 
 
+# ── C11: keyset pagination helper ────────────────────────────────────
+
+DEFAULT_PAGE_SIZE = 50
+MAX_PAGE_SIZE = 200
+
+
+async def paginate(session, model, *, cursor: str = "", limit: int = DEFAULT_PAGE_SIZE, order_col=None, extra_where=None):
+    """Keyset-paginate *model* ordered by *order_col* (default: created_at).
+
+    Returns ``{items, total, next_cursor}``.  *cursor* is an ISO-8601
+    timestamp from the previous page's ``next_cursor``.
+    """
+    from sqlalchemy import func, select
+
+    limit = min(max(1, limit), MAX_PAGE_SIZE)
+    col = order_col if order_col is not None else model.created_at
+
+    # Total count
+    cnt_stmt = select(func.count(model.id))
+    if extra_where is not None:
+        cnt_stmt = cnt_stmt.where(extra_where)
+    total = (await session.execute(cnt_stmt)).scalar() or 0
+
+    # Keyset — fetch limit+1 so we can detect whether there is a next page
+    stmt = select(model).order_by(col.desc() if order_col is None else col).limit(limit + 1)
+    if extra_where is not None:
+        stmt = stmt.where(extra_where)
+    if cursor:
+        try:
+            cursor_val = cursor
+            stmt = stmt.where(col < cursor_val)
+        except (ValueError, TypeError):
+            pass  # ignore malformed cursors, just return first page
+
+    result = await session.execute(stmt)
+    rows = result.scalars().all()
+    has_more = len(rows) > limit
+    if has_more:
+        rows = rows[:limit]
+
+    next_cursor = None
+    if has_more and rows:
+        last = rows[-1]
+        next_cursor = str(getattr(last, col.key))
+
+    return {
+        "items": rows,
+        "total": total,
+        "next_cursor": next_cursor,
+    }
+
+
 async def log_audit(session, principal: Principal, action: str, entity: str, before: dict | None = None, after: dict | None = None) -> None:
     """S12: append an AuditLog row (tenant-scoped). Caller commits the session."""
     from cante.models import AuditLog
@@ -143,6 +195,98 @@ class UserCreateIn(BaseModel):
     email: str
     password: str
     role: str = "operator"
+
+
+# ── C19: Pydantic request models for CRUD endpoints ─────────────────────
+
+
+class NumberCreateIn(BaseModel):
+    phone: str
+    display_name: str = ""
+    channel_type: str = "whatsapp_evolution"
+
+
+class BotCreateIn(BaseModel):
+    name: str
+    skill_id: str
+    provider_id: str
+    type_label: str = "custom"
+    language_default: str = "en"
+
+
+class BotUpdateIn(BaseModel):
+    name: str | None = None
+    type_label: str | None = None
+    language_default: str | None = None
+    skill_id: str | None = None
+    provider_id: str | None = None
+    enabled: bool | None = None
+
+
+class SkillCreateIn(BaseModel):
+    name: str
+    preset: str = "custom"
+    playbook_md: str = ""
+    guardrails_md: str = ""
+    language_default: str = "en"
+    scope: dict = {}
+    tools: dict = {}
+    done_condition: str = ""
+    escalation: dict = {}
+
+
+class SkillUpdateIn(BaseModel):
+    name: str | None = None
+    preset: str | None = None
+    playbook_md: str | None = None
+    guardrails_md: str | None = None
+    language_default: str | None = None
+    scope: dict | None = None
+    tools: dict | None = None
+    done_condition: str | None = None
+    escalation: dict | None = None
+
+
+class ProviderCreateIn(BaseModel):
+    name: str
+    type: str
+    base_url: str
+    model: str
+    api_key_ref: str
+    params: dict = {}
+
+
+class RouteCreateIn(BaseModel):
+    number_id: str
+    bot_id: str
+    selector: str = "default"
+    selector_value: str = ""
+    priority: int = 0
+
+
+class ContactUpdateIn(BaseModel):
+    name: str | None = None
+    attributes: dict | None = None
+
+
+class GroupCreateIn(BaseModel):
+    name: str
+    number_id: str | None = None
+
+
+class GroupAddMemberIn(BaseModel):
+    contact_id: str
+
+
+class SendAsHumanIn(BaseModel):
+    body: str
+
+
+class TriggerCreateIn(BaseModel):
+    conversation_id: str = ""
+    to_phone: str = ""
+    from_number: str = ""
+    body: str = ""
 
 
 # S7: login throttle — 5 attempts per 15 min, per-IP and per-email.
@@ -240,19 +384,22 @@ async def create_user(data: UserCreateIn, principal: Principal = Depends(Require
 # ── Numbers ─────────────────────────────────────────────────────────
 
 @app.get("/v1/numbers")
-async def list_numbers(principal: Principal = Depends(tenant_context)):
+async def list_numbers(cursor: str = "", limit: int = DEFAULT_PAGE_SIZE, principal: Principal = Depends(tenant_context)):
     from cante.models import Number
-    from sqlalchemy import select
     async with async_session_factory() as session:
-        result = await session.execute(select(Number).limit(50))
-        return [{"id": n.id, "phone": n.phone, "status": n.status, "display_name": n.display_name, "channel_type": n.channel_type} for n in result.scalars().all()]
+        page = await paginate(session, Number, cursor=cursor, limit=limit)
+        return {
+            "items": [{"id": n.id, "phone": n.phone, "status": n.status, "display_name": n.display_name, "channel_type": n.channel_type} for n in page["items"]],
+            "total": page["total"],
+            "next_cursor": page["next_cursor"],
+        }
 
 
 @app.post("/v1/numbers")
-async def create_number(data: dict, principal: Principal = Depends(RequireRole("admin"))):
+async def create_number(data: NumberCreateIn, principal: Principal = Depends(RequireRole("admin"))):
     from cante.models import Number
     async with async_session_factory() as session:
-        n = Number(phone=data["phone"], display_name=data.get("display_name", ""), channel_type=data.get("channel_type", "whatsapp_evolution"))
+        n = Number(phone=data.phone, display_name=data.display_name, channel_type=data.channel_type)
         session.add(n)
         await session.flush()
         await log_audit(session, principal, "number.create", f"number:{n.id}", after={"phone": n.phone, "channel_type": n.channel_type})
@@ -332,19 +479,22 @@ async def disconnect_number(num_id: str, principal: Principal = Depends(RequireR
 # ── Bots ────────────────────────────────────────────────────────────
 
 @app.get("/v1/bots")
-async def list_bots(principal: Principal = Depends(tenant_context)):
+async def list_bots(cursor: str = "", limit: int = DEFAULT_PAGE_SIZE, principal: Principal = Depends(tenant_context)):
     from cante.models import Bot
-    from sqlalchemy import select
     async with async_session_factory() as session:
-        result = await session.execute(select(Bot).limit(50))
-        return [{"id": b.id, "name": b.name, "type_label": b.type_label, "language_default": b.language_default, "enabled": b.enabled, "skill_id": b.skill_id, "provider_id": b.provider_id} for b in result.scalars().all()]
+        page = await paginate(session, Bot, cursor=cursor, limit=limit)
+        return {
+            "items": [{"id": b.id, "name": b.name, "type_label": b.type_label, "language_default": b.language_default, "enabled": b.enabled, "skill_id": b.skill_id, "provider_id": b.provider_id} for b in page["items"]],
+            "total": page["total"],
+            "next_cursor": page["next_cursor"],
+        }
 
 
 @app.post("/v1/bots")
-async def create_bot(data: dict, principal: Principal = Depends(RequireRole("admin"))):
+async def create_bot(data: BotCreateIn, principal: Principal = Depends(RequireRole("admin"))):
     from cante.models import Bot
     async with async_session_factory() as session:
-        b = Bot(name=data["name"], skill_id=data["skill_id"], provider_id=data["provider_id"], type_label=data.get("type_label", "custom"), language_default=data.get("language_default", "en"))
+        b = Bot(name=data.name, skill_id=data.skill_id, provider_id=data.provider_id, type_label=data.type_label, language_default=data.language_default)
         session.add(b)
         await session.flush()
         await log_audit(session, principal, "bot.create", f"bot:{b.id}", after={"name": b.name, "skill_id": b.skill_id, "provider_id": b.provider_id})
@@ -353,16 +503,17 @@ async def create_bot(data: dict, principal: Principal = Depends(RequireRole("adm
 
 
 @app.patch("/v1/bots/{bot_id}")
-async def update_bot(bot_id: str, data: dict, principal: Principal = Depends(RequireRole("admin"))):
+async def update_bot(bot_id: str, data: BotUpdateIn, principal: Principal = Depends(RequireRole("admin"))):
     from cante.models import Bot
     async with async_session_factory() as session:
         b = await load_owned(session, Bot, bot_id, principal)
         before = {"name": b.name, "type_label": b.type_label, "enabled": b.enabled}
+        updates = data.model_dump(exclude_unset=True)
         for field in ("name", "type_label", "language_default", "skill_id", "provider_id"):
-            if field in data:
-                setattr(b, field, data[field])
-        if "enabled" in data:
-            b.enabled = data["enabled"]
+            if field in updates:
+                setattr(b, field, updates[field])
+        if "enabled" in updates:
+            b.enabled = updates["enabled"]
         await log_audit(session, principal, "bot.update", f"bot:{b.id}", before=before, after={"name": b.name, "enabled": b.enabled})
         await session.commit()
         return {"id": b.id, "name": b.name}
@@ -371,19 +522,22 @@ async def update_bot(bot_id: str, data: dict, principal: Principal = Depends(Req
 # ── Skills ──────────────────────────────────────────────────────────
 
 @app.get("/v1/skills")
-async def list_skills(principal: Principal = Depends(tenant_context)):
+async def list_skills(cursor: str = "", limit: int = DEFAULT_PAGE_SIZE, principal: Principal = Depends(tenant_context)):
     from cante.models import Skill
-    from sqlalchemy import select
     async with async_session_factory() as session:
-        result = await session.execute(select(Skill).limit(50))
-        return [{"id": s.id, "name": s.name, "preset": s.preset, "language_default": s.language_default, "enabled": s.enabled, "playbook_md": s.playbook_md[:200]} for s in result.scalars().all()]
+        page = await paginate(session, Skill, cursor=cursor, limit=limit)
+        return {
+            "items": [{"id": s.id, "name": s.name, "preset": s.preset, "language_default": s.language_default, "enabled": s.enabled, "playbook_md": s.playbook_md[:200]} for s in page["items"]],
+            "total": page["total"],
+            "next_cursor": page["next_cursor"],
+        }
 
 
 @app.post("/v1/skills")
-async def create_skill(data: dict, principal: Principal = Depends(RequireRole("admin"))):
+async def create_skill(data: SkillCreateIn, principal: Principal = Depends(RequireRole("admin"))):
     from cante.models import Skill
     async with async_session_factory() as session:
-        s = Skill(name=data["name"], preset=data.get("preset", "custom"), playbook_md=data.get("playbook_md", ""), guardrails_md=data.get("guardrails_md", ""), language_default=data.get("language_default", "en"), scope=data.get("scope", {}), tools=data.get("tools", {}), done_condition=data.get("done_condition", ""), escalation=data.get("escalation", {}))
+        s = Skill(name=data.name, preset=data.preset, playbook_md=data.playbook_md, guardrails_md=data.guardrails_md, language_default=data.language_default, scope=data.scope, tools=data.tools, done_condition=data.done_condition, escalation=data.escalation)
         session.add(s)
         await session.flush()
         await log_audit(session, principal, "skill.create", f"skill:{s.id}", after={"name": s.name, "preset": s.preset})
@@ -395,20 +549,21 @@ async def create_skill(data: dict, principal: Principal = Depends(RequireRole("a
 
 
 @app.patch("/v1/skills/{skill_id}")
-async def update_skill(skill_id: str, data: dict, principal: Principal = Depends(RequireRole("admin"))):
+async def update_skill(skill_id: str, data: SkillUpdateIn, principal: Principal = Depends(RequireRole("admin"))):
     from cante.models import Skill, SkillVersion
     from sqlalchemy import func, select
     async with async_session_factory() as session:
         s = await load_owned(session, Skill, skill_id, principal)
+        updates = data.model_dump(exclude_unset=True)
         for field in ("name", "preset", "playbook_md", "guardrails_md", "language_default", "done_condition"):
-            if field in data:
-                setattr(s, field, data[field])
-        if "scope" in data:
-            s.scope = data["scope"]
-        if "tools" in data:
-            s.tools = data["tools"]
-        if "escalation" in data:
-            s.escalation = data["escalation"]
+            if field in updates:
+                setattr(s, field, updates[field])
+        if "scope" in updates:
+            s.scope = updates["scope"]
+        if "tools" in updates:
+            s.tools = updates["tools"]
+        if "escalation" in updates:
+            s.escalation = updates["escalation"]
         max_v = (await session.execute(select(func.max(SkillVersion.version)).where(SkillVersion.skill_id == skill_id))).scalar() or 0
         session.add(SkillVersion(skill_id=s.id, version=max_v + 1, snapshot={"name": s.name, "playbook_md": s.playbook_md, "guardrails_md": s.guardrails_md, "scope": s.scope, "tools": s.tools, "done_condition": s.done_condition, "escalation": s.escalation}))
         await log_audit(session, principal, "skill.update", f"skill:{s.id}", after={"name": s.name, "version": max_v + 1})
@@ -419,19 +574,22 @@ async def update_skill(skill_id: str, data: dict, principal: Principal = Depends
 # ── Providers ───────────────────────────────────────────────────────
 
 @app.get("/v1/providers")
-async def list_providers(principal: Principal = Depends(tenant_context)):
+async def list_providers(cursor: str = "", limit: int = DEFAULT_PAGE_SIZE, principal: Principal = Depends(tenant_context)):
     from cante.models import Provider
-    from sqlalchemy import select
     async with async_session_factory() as session:
-        result = await session.execute(select(Provider).limit(50))
-        return [{"id": p.id, "name": p.name, "type": p.type, "model": p.model, "enabled": p.enabled, "base_url": p.base_url} for p in result.scalars().all()]
+        page = await paginate(session, Provider, cursor=cursor, limit=limit)
+        return {
+            "items": [{"id": p.id, "name": p.name, "type": p.type, "model": p.model, "enabled": p.enabled, "base_url": p.base_url} for p in page["items"]],
+            "total": page["total"],
+            "next_cursor": page["next_cursor"],
+        }
 
 
 @app.post("/v1/providers")
-async def create_provider(data: dict, principal: Principal = Depends(RequireRole("admin"))):
+async def create_provider(data: ProviderCreateIn, principal: Principal = Depends(RequireRole("admin"))):
     from cante.models import Provider
     async with async_session_factory() as session:
-        p = Provider(name=data["name"], type=data["type"], base_url=data["base_url"], model=data["model"], api_key_ref=data["api_key_ref"], params=data.get("params", {}))
+        p = Provider(name=data.name, type=data.type, base_url=data.base_url, model=data.model, api_key_ref=data.api_key_ref, params=data.params)
         session.add(p)
         await session.flush()
         await log_audit(session, principal, "provider.create", f"provider:{p.id}", after={"name": p.name, "type": p.type, "model": p.model})
@@ -442,19 +600,22 @@ async def create_provider(data: dict, principal: Principal = Depends(RequireRole
 # ── Routes ──────────────────────────────────────────────────────────
 
 @app.get("/v1/routes")
-async def list_routes(principal: Principal = Depends(tenant_context)):
+async def list_routes(cursor: str = "", limit: int = DEFAULT_PAGE_SIZE, principal: Principal = Depends(tenant_context)):
     from cante.models import Route
-    from sqlalchemy import select
     async with async_session_factory() as session:
-        result = await session.execute(select(Route).limit(50))
-        return [{"id": r.id, "number_id": r.number_id, "bot_id": r.bot_id, "selector": r.selector, "selector_value": r.selector_value, "enabled": r.enabled} for r in result.scalars().all()]
+        page = await paginate(session, Route, cursor=cursor, limit=limit)
+        return {
+            "items": [{"id": r.id, "number_id": r.number_id, "bot_id": r.bot_id, "selector": r.selector, "selector_value": r.selector_value, "enabled": r.enabled} for r in page["items"]],
+            "total": page["total"],
+            "next_cursor": page["next_cursor"],
+        }
 
 
 @app.post("/v1/routes")
-async def create_route(data: dict, principal: Principal = Depends(RequireRole("admin"))):
+async def create_route(data: RouteCreateIn, principal: Principal = Depends(RequireRole("admin"))):
     from cante.models import Route
     async with async_session_factory() as session:
-        r = Route(number_id=data["number_id"], bot_id=data["bot_id"], selector=data.get("selector", "default"), selector_value=data.get("selector_value", ""), priority=data.get("priority", 0))
+        r = Route(number_id=data.number_id, bot_id=data.bot_id, selector=data.selector, selector_value=data.selector_value, priority=data.priority)
         session.add(r)
         await session.flush()
         await log_audit(session, principal, "route.create", f"route:{r.id}", after={"number_id": r.number_id, "bot_id": r.bot_id, "selector": r.selector})
@@ -476,30 +637,60 @@ async def delete_route(route_id: str, principal: Principal = Depends(RequireRole
 # ── Contacts ────────────────────────────────────────────────────────
 
 @app.get("/v1/contacts")
-async def list_contacts(number_id: str = "", group_id: str = "", search: str = "", principal: Principal = Depends(tenant_context)):
+async def list_contacts(
+    cursor: str = "", limit: int = DEFAULT_PAGE_SIZE,
+    search: str = "", principal: Principal = Depends(tenant_context),
+):
     from cante.models import Contact
-    from sqlalchemy import select
+    from sqlalchemy import func, select
+
     async with async_session_factory() as session:
-        stmt = select(Contact).order_by(Contact.last_seen.desc()).limit(100)
+        limit = min(max(1, limit), MAX_PAGE_SIZE)
+        col = Contact.last_seen
+
+        # Count
+        cnt_stmt = select(func.count(Contact.id))
+        if search:
+            esc = _escape_like(search)
+            cnt_stmt = cnt_stmt.where(
+                (Contact.name.ilike(f"%{esc}%", escape="\\"))
+                | (Contact.phone.ilike(f"%{esc}%", escape="\\"))
+            )
+        total = (await session.execute(cnt_stmt)).scalar() or 0
+
+        # Keyset
+        stmt = select(Contact).order_by(col.desc()).limit(limit + 1)
         if search:
             esc = _escape_like(search)
             stmt = stmt.where(
-                (Contact.name.ilike(f"%{esc}%", escape="\\")) | (Contact.phone.ilike(f"%{esc}%", escape="\\"))
+                (Contact.name.ilike(f"%{esc}%", escape="\\"))
+                | (Contact.phone.ilike(f"%{esc}%", escape="\\"))
             )
+        if cursor:
+            stmt = stmt.where(col < cursor)
         result = await session.execute(stmt)
-        return [{"id": c.id, "phone": c.phone, "name": c.name, "attributes": c.attributes, "first_seen": str(c.first_seen), "last_seen": str(c.last_seen)} for c in result.scalars().all()]
+        rows = result.scalars().all()
+        has_more = len(rows) > limit
+        if has_more:
+            rows = rows[:limit]
+
+        return {
+            "items": [{"id": c.id, "phone": c.phone, "name": c.name, "attributes": c.attributes, "first_seen": str(c.first_seen), "last_seen": str(c.last_seen)} for c in rows],
+            "total": total,
+            "next_cursor": str(rows[-1].last_seen) if has_more and rows else None,
+        }
 
 
 @app.patch("/v1/contacts/{contact_id}")
-async def update_contact(contact_id: str, data: dict, principal: Principal = Depends(tenant_context)):
+async def update_contact(contact_id: str, data: ContactUpdateIn, principal: Principal = Depends(tenant_context)):
     from cante.models import Contact
     async with async_session_factory() as session:
         c = await load_owned(session, Contact, contact_id, principal)
         before = {"name": c.name, "attributes": c.attributes}
-        if "name" in data:
-            c.name = data["name"]
-        if "attributes" in data:
-            c.attributes = {**c.attributes, **data["attributes"]}
+        if data.name is not None:
+            c.name = data.name
+        if data.attributes is not None:
+            c.attributes = {**c.attributes, **data.attributes}
         await log_audit(session, principal, "contact.update", f"contact:{c.id}", before=before, after={"name": c.name, "attributes": c.attributes})
         await session.commit()
         return {"id": c.id, "name": c.name}
@@ -508,29 +699,32 @@ async def update_contact(contact_id: str, data: dict, principal: Principal = Dep
 # ── Contact Groups ──────────────────────────────────────────────────
 
 @app.get("/v1/groups")
-async def list_groups(principal: Principal = Depends(tenant_context)):
+async def list_groups(cursor: str = "", limit: int = DEFAULT_PAGE_SIZE, principal: Principal = Depends(tenant_context)):
     from cante.models import ContactGroup
-    from sqlalchemy import select
     async with async_session_factory() as session:
-        result = await session.execute(select(ContactGroup).limit(50))
-        return [{"id": g.id, "name": g.name, "number_id": g.number_id} for g in result.scalars().all()]
+        page = await paginate(session, ContactGroup, cursor=cursor, limit=limit)
+        return {
+            "items": [{"id": g.id, "name": g.name, "number_id": g.number_id} for g in page["items"]],
+            "total": page["total"],
+            "next_cursor": page["next_cursor"],
+        }
 
 
 @app.post("/v1/groups")
-async def create_group(data: dict, principal: Principal = Depends(tenant_context)):
+async def create_group(data: GroupCreateIn, principal: Principal = Depends(tenant_context)):
     from cante.models import ContactGroup
     async with async_session_factory() as session:
-        g = ContactGroup(name=data["name"], number_id=data.get("number_id"))
+        g = ContactGroup(name=data.name, number_id=data.number_id)
         session.add(g)
         await session.commit()
         return {"id": g.id, "name": g.name}
 
 
 @app.post("/v1/groups/{group_id}/members")
-async def add_member(group_id: str, data: dict, principal: Principal = Depends(tenant_context)):
+async def add_member(group_id: str, data: GroupAddMemberIn, principal: Principal = Depends(tenant_context)):
     from cante.models import GroupMembership
     async with async_session_factory() as session:
-        m = GroupMembership(contact_id=data["contact_id"], group_id=group_id)
+        m = GroupMembership(contact_id=data.contact_id, group_id=group_id)
         session.add(m)
         await session.commit()
         return {"status": "added"}
@@ -540,21 +734,48 @@ async def add_member(group_id: str, data: dict, principal: Principal = Depends(t
 
 @app.get("/v1/conversations")
 async def list_conversations(
-    state: str = "", bot_id: str = "", number_id: str = "", search: str = "",
+    cursor: str = "", limit: int = DEFAULT_PAGE_SIZE,
+    state: str = "", bot_id: str = "", number_id: str = "",
     principal: Principal = Depends(tenant_context),
 ):
     from cante.models import Conversation
-    from sqlalchemy import select
+    from sqlalchemy import func, select
+
     async with async_session_factory() as session:
-        stmt = select(Conversation).order_by(Conversation.last_activity_at.desc()).limit(50)
+        limit = min(max(1, limit), MAX_PAGE_SIZE)
+        col = Conversation.last_activity_at
+
+        # Count
+        cnt_stmt = select(func.count(Conversation.id))
+        if state:
+            cnt_stmt = cnt_stmt.where(Conversation.state == state)
+        if bot_id:
+            cnt_stmt = cnt_stmt.where(Conversation.bot_id == bot_id)
+        if number_id:
+            cnt_stmt = cnt_stmt.where(Conversation.number_id == number_id)
+        total = (await session.execute(cnt_stmt)).scalar() or 0
+
+        # Keyset
+        stmt = select(Conversation).order_by(col.desc()).limit(limit + 1)
         if state:
             stmt = stmt.where(Conversation.state == state)
         if bot_id:
             stmt = stmt.where(Conversation.bot_id == bot_id)
         if number_id:
             stmt = stmt.where(Conversation.number_id == number_id)
+        if cursor:
+            stmt = stmt.where(col < cursor)
         result = await session.execute(stmt)
-        return [{"id": c.id, "state": c.state, "language_detected": c.language_detected, "contact_id": c.contact_id, "bot_id": c.bot_id, "number_id": c.number_id, "last_activity_at": str(c.last_activity_at), "started_at": str(c.started_at)} for c in result.scalars().all()]
+        rows = result.scalars().all()
+        has_more = len(rows) > limit
+        if has_more:
+            rows = rows[:limit]
+
+        return {
+            "items": [{"id": c.id, "state": c.state, "language_detected": c.language_detected, "contact_id": c.contact_id, "bot_id": c.bot_id, "number_id": c.number_id, "last_activity_at": str(c.last_activity_at), "started_at": str(c.started_at)} for c in rows],
+            "total": total,
+            "next_cursor": str(rows[-1].last_activity_at) if has_more and rows else None,
+        }
 
 
 @app.get("/v1/conversations/{conv_id}")
@@ -569,18 +790,19 @@ async def get_conversation(conv_id: str, principal: Principal = Depends(tenant_c
 
 @app.post("/v1/conversations/{conv_id}/takeover")
 async def takeover(conv_id: str, principal: Principal = Depends(tenant_context)):
+    """C21: takeover sets human_active so the worker backs off."""
     from cante.models import Conversation
     async with async_session_factory() as session:
         conv = await load_owned(session, Conversation, conv_id, principal)
         before = {"state": conv.state}
-        conv.state = "active"
+        conv.state = "human_active"
         await log_audit(session, principal, "conversation.takeover", f"conversation:{conv.id}", before=before, after={"state": conv.state})
         await session.commit()
         return {"id": conv.id, "state": conv.state}
 
 
 @app.post("/v1/conversations/{conv_id}/send")
-async def send_as_human(conv_id: str, data: dict, principal: Principal = Depends(tenant_context)):
+async def send_as_human(conv_id: str, data: SendAsHumanIn, principal: Principal = Depends(tenant_context)):
     from cante.bus import RedisStreamsBus
     from cante.models import Conversation, Number
     from cante.redis import get_redis
@@ -593,8 +815,8 @@ async def send_as_human(conv_id: str, data: dict, principal: Principal = Depends
         number_phone = number.phone if number else ""
         redis = await get_redis()
         bus = RedisStreamsBus(redis)
-        await bus.publish("stream:outbound", {"conversation_id": conv_id, "from_phone": "", "number_phone": number_phone, "body": data["body"]})
-        await log_audit(session, principal, "conversation.send_as_human", f"conversation:{conv.id}", after={"body": data["body"], "number_phone": number_phone})
+        await bus.publish("stream:outbound", {"conversation_id": conv_id, "from_phone": "", "number_phone": number_phone, "body": data.body})
+        await log_audit(session, principal, "conversation.send_as_human", f"conversation:{conv.id}", after={"body": data.body, "number_phone": number_phone})
         await session.commit()
         return {"status": "sent"}
 
@@ -614,24 +836,44 @@ async def close_conv(conv_id: str, principal: Principal = Depends(tenant_context
 # ── Learning ────────────────────────────────────────────────────────
 
 @app.get("/v1/learnings")
-async def list_learnings(status: str = "", principal: Principal = Depends(tenant_context)):
+async def list_learnings(cursor: str = "", limit: int = DEFAULT_PAGE_SIZE, status: str = "", principal: Principal = Depends(tenant_context)):
     from cante.models import Learning
-    from sqlalchemy import select
+    from sqlalchemy import func, select
+
     async with async_session_factory() as session:
-        stmt = select(Learning).order_by(Learning.created_at.desc()).limit(50)
+        limit = min(max(1, limit), MAX_PAGE_SIZE)
+        col = Learning.created_at
+
+        cnt_stmt = select(func.count(Learning.id))
+        if status:
+            cnt_stmt = cnt_stmt.where(Learning.status == status)
+        total = (await session.execute(cnt_stmt)).scalar() or 0
+
+        stmt = select(Learning).order_by(col.desc()).limit(limit + 1)
         if status:
             stmt = stmt.where(Learning.status == status)
+        if cursor:
+            stmt = stmt.where(col < cursor)
         result = await session.execute(stmt)
-        return [
-            {
-                "id": learning.id,
-                "type": learning.type,
-                "suggestion_md": learning.suggestion_md[:200],
-                "category": learning.category,
-                "status": learning.status,
-            }
-            for learning in result.scalars().all()
-        ]
+        rows = result.scalars().all()
+        has_more = len(rows) > limit
+        if has_more:
+            rows = rows[:limit]
+
+        return {
+            "items": [
+                {
+                    "id": learning.id,
+                    "type": learning.type,
+                    "suggestion_md": learning.suggestion_md[:200],
+                    "category": learning.category,
+                    "status": learning.status,
+                }
+                for learning in rows
+            ],
+            "total": total,
+            "next_cursor": str(rows[-1].created_at) if has_more and rows else None,
+        }
 
 
 @app.post("/v1/learnings/{learning_id}/approve")
@@ -672,35 +914,68 @@ async def reject_learning(learning_id: str, principal: Principal = Depends(tenan
 
 @app.get("/v1/metrics/overview")
 async def metrics_overview(principal: Principal = Depends(tenant_context)):
+    """Single-query dashboard counters (C9 — collapsed from 7 queries to 1)."""
     from cante.models import Bot, Conversation, Message, Number
-    from sqlalchemy import func, select
+    from sqlalchemy import case, func, select
+
     async with async_session_factory() as session:
+        row = (
+            await session.execute(
+                select(
+                    func.count(Conversation.id).label("total_conversations"),
+                    func.count(
+                        case((Conversation.state == "needs_human", 1))
+                    ).label("escalated"),
+                    func.count(
+                        case((Conversation.state == "active", 1))
+                    ).label("active"),
+                    func.count(
+                        case((Conversation.state == "closed", 1))
+                    ).label("closed"),
+                    select(func.count(Bot.id))
+                    .correlate(None)
+                    .scalar_subquery()
+                    .label("total_bots"),
+                    select(func.count(Number.id))
+                    .correlate(None)
+                    .scalar_subquery()
+                    .label("total_numbers"),
+                    select(func.count(Message.id))
+                    .correlate(None)
+                    .scalar_subquery()
+                    .label("total_messages"),
+                )
+            )
+        ).one()
         return {
-            "total_conversations": (await session.execute(select(func.count(Conversation.id)))).scalar() or 0,
-            "escalated": (await session.execute(select(func.count(Conversation.id)).where(Conversation.state == "needs_human"))).scalar() or 0,
-            "active": (await session.execute(select(func.count(Conversation.id)).where(Conversation.state == "active"))).scalar() or 0,
-            "closed": (await session.execute(select(func.count(Conversation.id)).where(Conversation.state == "closed"))).scalar() or 0,
-            "total_bots": (await session.execute(select(func.count(Bot.id)))).scalar() or 0,
-            "total_numbers": (await session.execute(select(func.count(Number.id)))).scalar() or 0,
-            "total_messages": (await session.execute(select(func.count(Message.id)))).scalar() or 0,
+            "total_conversations": row.total_conversations or 0,
+            "escalated": row.escalated or 0,
+            "active": row.active or 0,
+            "closed": row.closed or 0,
+            "total_bots": row.total_bots or 0,
+            "total_numbers": row.total_numbers or 0,
+            "total_messages": row.total_messages or 0,
         }
 
 
 # ── Audit ───────────────────────────────────────────────────────────
 
 @app.get("/v1/audit")
-async def list_audit(principal: Principal = Depends(RequireRole("admin"))):
+async def list_audit(cursor: str = "", limit: int = DEFAULT_PAGE_SIZE, principal: Principal = Depends(RequireRole("admin"))):
     from cante.models import AuditLog
-    from sqlalchemy import select
     async with async_session_factory() as session:
-        result = await session.execute(select(AuditLog).order_by(AuditLog.created_at.desc()).limit(100))
-        return [{"id": a.id, "actor": a.actor, "action": a.action, "entity": a.entity, "created_at": str(a.created_at)} for a in result.scalars().all()]
+        page = await paginate(session, AuditLog, cursor=cursor, limit=limit)
+        return {
+            "items": [{"id": a.id, "actor": a.actor, "action": a.action, "entity": a.entity, "created_at": str(a.created_at)} for a in page["items"]],
+            "total": page["total"],
+            "next_cursor": page["next_cursor"],
+        }
 
 
 # ── Triggers ────────────────────────────────────────────────────────
 
 @app.post("/v1/triggers")
-async def create_trigger(data: dict, request: Request):
+async def create_trigger(data: TriggerCreateIn, request: Request):
     # S2: machine-to-machine trigger key, separate from the JWT secret,
     # compared in constant time to avoid timing oracles.
     import secrets as _pysecrets
@@ -713,7 +988,7 @@ async def create_trigger(data: dict, request: Request):
     from cante.redis import get_redis
     redis = await get_redis()
     bus = RedisStreamsBus(redis)
-    await bus.publish("stream:triggers", {"conversation_id": data.get("conversation_id", ""), "from_phone": data.get("to_phone", ""), "number_phone": data.get("from_number", ""), "body": data.get("body", "")})
+    await bus.publish("stream:triggers", {"conversation_id": data.conversation_id, "from_phone": data.to_phone, "number_phone": data.from_number, "body": data.body})
     return {"status": "queued"}
 
 

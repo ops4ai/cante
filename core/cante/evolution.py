@@ -78,6 +78,8 @@ class EvolutionAdapter:
         )
 
     async def send_text(self, number_config: dict, to: str, text: str):
+        from cante.channel import SentMessage
+
         instance = number_config.get("instance", number_config.get("phone", ""))
         url = f"{self._base_url}/message/sendText/{instance}"
 
@@ -96,13 +98,6 @@ class EvolutionAdapter:
         )
         resp.raise_for_status()
         result = resp.json()
-        from dataclasses import dataclass
-
-        @dataclass
-        class SentMessage:
-            provider_message_id: str
-            channel: str
-
         return SentMessage(
             provider_message_id=result.get("key", {}).get("id", ""),
             channel="whatsapp_evolution",
@@ -122,6 +117,8 @@ class EvolutionAdapter:
         )
 
     async def connect(self, number_config: dict):
+        from cante.channel import ConnectResult
+
         instance = number_config.get("instance", number_config.get("phone", ""))
         url = f"{self._base_url}/instance/connect/{instance}"
 
@@ -132,19 +129,14 @@ class EvolutionAdapter:
         )
         resp.raise_for_status()
         data = resp.json()
-        from dataclasses import dataclass
-
-        @dataclass
-        class ConnectResult:
-            qr_code: str
-            status: str
-
         return ConnectResult(
             qr_code=data.get("qrCode", data.get("base64", "")),
             status="qr_pending",
         )
 
     async def status(self, number_config: dict):
+        from cante.channel import ConnectionStatus
+
         instance = number_config.get("instance", number_config.get("phone", ""))
         url = f"{self._base_url}/instance/connectionState/{instance}"
 
@@ -155,14 +147,6 @@ class EvolutionAdapter:
         )
         resp.raise_for_status()
         data = resp.json()
-        from dataclasses import dataclass
-
-        @dataclass
-        class ConnectionStatus:
-            status: str
-            phone: str
-            instance_id: str
-
         return ConnectionStatus(
             status=data.get("state", "disconnected"),
             phone=number_config.get("phone", ""),

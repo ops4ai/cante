@@ -167,7 +167,7 @@ async def test_audit_logged_on_number_create(app, admin_token):
         audit = await client.get(
             "/v1/audit", headers={"Authorization": f"Bearer {admin_token}"}
         )
-    actions = {row["action"] for row in audit.json()}
+    actions = {row["action"] for row in audit.json()["items"]}
     assert "number.create" in actions
 
 

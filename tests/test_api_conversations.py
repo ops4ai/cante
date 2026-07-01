@@ -42,10 +42,11 @@ async def test_number_id_filter_narrows_results(app, admin_token):
     n1_id, _n2_id = await _seed_two_conversations_on_different_numbers()
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-        # No filter → both conversations.
+        # No filter → both conversations (C11: response is {items, total, next_cursor}).
         r_all = await client.get("/v1/conversations", headers={"Authorization": f"Bearer {admin_token}"})
         assert r_all.status_code == 200
-        assert len(r_all.json()) == 2
+        assert r_all.json()["total"] == 2
+        assert len(r_all.json()["items"]) == 2
 
         # Filter by n1 → only the conversation on n1.
         r_filtered = await client.get(
@@ -54,6 +55,6 @@ async def test_number_id_filter_narrows_results(app, admin_token):
             headers={"Authorization": f"Bearer {admin_token}"},
         )
         assert r_filtered.status_code == 200
-        rows = r_filtered.json()
+        rows = r_filtered.json()["items"]
         assert len(rows) == 1
         assert rows[0]["number_id"] == n1_id

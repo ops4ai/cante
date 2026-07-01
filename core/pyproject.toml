@@ -42,3 +42,15 @@ ignore = ["N818"]  # Exception name "LLMAPITimeout" is intentional — it IS a t
 python_version = "3.12"
 strict = true
 ignore_missing_imports = true
+
+[tool.coverage.run]
+source_pkgs = ["cante", "services"]
+omit = ["*/tests/*", "*/test_*"]
+
+[tool.coverage.report]
+fail_under = 50
+exclude_also = [
+    "if __name__ == .__main__.:",
+    "class .*\\b(Protocol)\\b",
+    "@(abc\\.)?abstractmethod",
+]

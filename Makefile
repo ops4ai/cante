@@ -27,10 +27,12 @@ smoke:
 	$(COMPOSE_CMD) exec api python -m tests.smoke
 
 test:
-	pytest -v --cov=cante --cov=services --cov-report=term-missing
+	pytest -v --cov=cante --cov=services --cov-report=term-missing \
+		--cov-fail-under=50 \
 
 lint:
-	ruff check core/ services/ && mypy core/ services/
+	ruff check core/ services/
+	mypy core/ services/
 
 clean:
 	$(COMPOSE_CMD) down -v

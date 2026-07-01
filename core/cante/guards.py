@@ -1,6 +1,9 @@
 """Guard pipeline — post-generation checks, ordered, per-Bot configurable."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
+from typing import Any, Protocol
 
 
 @dataclass
@@ -11,57 +14,99 @@ class GuardResult:
     reason: str = ""
 
 
+# ── C16: uniform guard context ─────────────────────────────────────────────
+
+@dataclass
+class GuardContext:
+    """Single context object passed to every guard via ``check(ctx)``.
+
+    This replaces the old isinstance-dispatch in GuardPipeline.run() with a
+    polymorphic interface — each guard inspects only the fields it needs.
+    """
+
+    user_message: str = ""
+    reply: str = ""
+    scope: dict | None = None
+    expected_lang: str = ""
+    last_outbound: str | None = None
+    llm: Any = None
+
+
+class Guard(Protocol):
+    """Uniform guard interface (C16)."""
+
+    async def check(self, ctx: GuardContext) -> GuardResult: ...
+
+
+# ── Built-in guards ────────────────────────────────────────────────────────
+
+
 class ScopeGuard:
     """Cheap classification: is the user intent still in the Skill's scope?"""
 
-    async def check(self, user_message: str, reply: str, scope: dict, _llm) -> GuardResult:
-        # In v1: simple keyword/pattern check against scope["in"].
-        # Stretch: a cheap LLM classification with a constrained prompt.
+    async def check(self, ctx: GuardContext) -> GuardResult:
+        scope = ctx.scope or {}
         in_scope_keywords = scope.get("in", [])
         if not in_scope_keywords:
-            return GuardResult(passed=True, content=reply, action="none")
+            return GuardResult(passed=True, content=ctx.reply, action="none")
 
-        # Basic: check if the user message contains any in-scope terms
-        user_lower = user_message.lower()
+        user_lower = ctx.user_message.lower()
         hits = any(kw.lower() in user_lower for kw in in_scope_keywords)
         if not hits:
             out_policy = scope.get("out_policy", "redirect_then_escalate")
             return GuardResult(
                 passed=False,
-                content=reply,
+                content=ctx.reply,
                 action=out_policy,
                 reason="user_intent_out_of_scope",
             )
-        return GuardResult(passed=True, content=reply, action="none")
+        return GuardResult(passed=True, content=ctx.reply, action="none")
 
 
 class LanguageGuard:
-    """Detect if the reply drifted from the resolved conversation language and force a regeneration."""
+    """Detect if the reply drifted from the resolved conversation language."""
 
-    async def check(self, reply: str, expected_lang: str, _llm) -> GuardResult:
-        if not expected_lang or expected_lang == "any":
-            return GuardResult(passed=True, content=reply, action="none")
-        # In v1: basic detection via common words / character set.
-        # Stretch: fast langdetect library.
-        return GuardResult(passed=True, content=reply, action="none")
+    async def check(self, ctx: GuardContext) -> GuardResult:
+        if not ctx.expected_lang or ctx.expected_lang == "any":
+            return GuardResult(passed=True, content=ctx.reply, action="none")
+        # v1: pass-through. Stretch: fast langdetect library.
+        return GuardResult(passed=True, content=ctx.reply, action="none")
 
 
 class DedupGuard:
     """Never send two identical messages in a row."""
 
-    async def check(self, reply: str, last_outbound: str | None, _llm) -> GuardResult:
-        if last_outbound and reply.strip() == last_outbound.strip():
+    async def check(self, ctx: GuardContext) -> GuardResult:
+        if (
+            ctx.last_outbound
+            and ctx.reply.strip() == ctx.last_outbound.strip()
+        ):
             return GuardResult(
                 passed=False,
-                content=reply,
+                content=ctx.reply,
                 action="regenerate",
                 reason="reply_identical_to_previous",
             )
-        return GuardResult(passed=True, content=reply, action="none")
+        return GuardResult(passed=True, content=ctx.reply, action="none")
+
+
+# ── Pipeline ───────────────────────────────────────────────────────────────
 
 
 class GuardPipeline:
-    """Ordered, pluggable guard execution."""
+    """Ordered, pluggable guard execution (C12 + C16).
+
+    Usage::
+
+        pipeline = GuardPipeline()
+        results = await pipeline.run(GuardContext(
+            user_message=..., reply=..., scope=...,
+            expected_lang=..., last_outbound=..., llm=...,
+        ))
+        for r in results:
+            if r.action == "escalate":
+                ...
+    """
 
     def __init__(self):
         self._guards: list = [ScopeGuard(), LanguageGuard(), DedupGuard()]
@@ -69,27 +114,22 @@ class GuardPipeline:
     def add(self, guard):
         self._guards.append(guard)
 
-    async def run(
-        self,
-        user_message: str,
-        reply: str,
-        *,
-        scope: dict | None = None,
-        expected_lang: str = "",
-        last_outbound: str | None = None,
-        llm=None,
-    ) -> list[GuardResult]:
-        results = []
+    async def run(self, ctx: GuardContext) -> list[GuardResult]:
+        results: list[GuardResult] = []
+        current_reply = ctx.reply
         for guard in self._guards:
-            if isinstance(guard, ScopeGuard):
-                result = await guard.check(user_message, reply, scope or {}, llm)
-            elif isinstance(guard, LanguageGuard):
-                result = await guard.check(reply, expected_lang, llm)
-            elif isinstance(guard, DedupGuard):
-                result = await guard.check(reply, last_outbound, llm)
-            else:
-                continue
+            # Build a fresh context with the possibly-mutated reply from
+            # the previous guard.
+            guard_ctx = GuardContext(
+                user_message=ctx.user_message,
+                reply=current_reply,
+                scope=ctx.scope,
+                expected_lang=ctx.expected_lang,
+                last_outbound=ctx.last_outbound,
+                llm=ctx.llm,
+            )
+            result = await guard.check(guard_ctx)
             results.append(result)
             if not result.passed:
-                reply = result.content  # Use potentially mutated content for next guard
+                current_reply = result.content
         return results

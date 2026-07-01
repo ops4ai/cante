@@ -1,32 +1,47 @@
-"""Test the guard pipeline."""
+"""Test the guard pipeline (C16 — GuardContext interface)."""
 import pytest
 
 
 @pytest.mark.asyncio
 async def test_dedup_guard_blocks_identical():
-    from cante.guards import DedupGuard
+    from cante.guards import DedupGuard, GuardContext
     guard = DedupGuard()
-    result = await guard.check("Hello", "Hello", None)
+    ctx = GuardContext(reply="Hello", last_outbound="Hello")
+    result = await guard.check(ctx)
     assert not result.passed
     assert result.action == "regenerate"
 
+
 @pytest.mark.asyncio
 async def test_dedup_guard_allows_different():
-    from cante.guards import DedupGuard
+    from cante.guards import DedupGuard, GuardContext
     guard = DedupGuard()
-    result = await guard.check("Hello", "Hi there", None)
+    ctx = GuardContext(reply="Hi there", last_outbound="Hello")
+    result = await guard.check(ctx)
     assert result.passed
+
 
 @pytest.mark.asyncio
 async def test_scope_guard_allows_in_scope():
-    from cante.guards import ScopeGuard
+    from cante.guards import ScopeGuard, GuardContext
     guard = ScopeGuard()
-    result = await guard.check("What are your hours?", "We are open 9-5", {"in": ["hours", "services"]}, None)
+    ctx = GuardContext(
+        user_message="What are your hours?",
+        reply="We are open 9-5",
+        scope={"in": ["hours", "services"]},
+    )
+    result = await guard.check(ctx)
     assert result.passed
+
 
 @pytest.mark.asyncio
 async def test_scope_guard_redirects_out_of_scope():
-    from cante.guards import ScopeGuard
+    from cante.guards import ScopeGuard, GuardContext
     guard = ScopeGuard()
-    result = await guard.check("What is the meaning of life?", "That's deep...", {"in": ["hours", "services"]}, None)
+    ctx = GuardContext(
+        user_message="What is the meaning of life?",
+        reply="That's deep...",
+        scope={"in": ["hours", "services"]},
+    )
+    result = await guard.check(ctx)
     assert not result.passed

@@ -275,23 +275,37 @@ async def process(entry, bus, redis):
     cid = data.get("conversation_id", from_phone or "unknown")
     lock = f"lock:conv:{cid}"
     # Debounce lock: another worker is already handling this conversation — drop
-    # (ack by design). TTL must exceed worst-case LLM latency (C14).
+    # (ack by design). TTL must exceed worst-case LLM latency.
     if not await redis.set(lock, "1", nx=True, ex=settings.worker_lock_ttl):
         return
+
+    # C14: heartbeat keeps the lock alive past the initial TTL so long-running
+    # LLM calls don't lose the lock and allow duplicate processing.
+    async def _heartbeat() -> None:
+        interval = max(settings.worker_lock_ttl // 2, 10)
+        while True:
+            await asyncio.sleep(interval)
+            await redis.expire(lock, settings.worker_lock_ttl)
+
+    heartbeat_task: asyncio.Task | None = None
     try:
         await asyncio.sleep(settings.debounce_ms_default / 1000.0)
+        heartbeat_task = asyncio.create_task(_heartbeat())
 
         # Echo mode (no LLM/DB) — dev / smoke without a configured provider.
         if not settings.worker_llm_enabled:
             reply, ctx_updates = await run_agent_loop(body, None, None)
+            skill_scope = {}
         else:
             route = await _resolve_route(from_phone, number_phone)
             if route is None:
                 logger.warning("worker.no_route", from_phone=from_phone, number_phone=number_phone)
                 reply = "Sorry, no agent is configured for this number right now."
                 ctx_updates = {}
+                skill_scope = {}
             else:
                 tenant_id, _bot, skill, provider, api_key, _contact_id, conv_id = route
+                skill_scope = skill.scope
                 # Persist the inbound message before the LLM call.
                 await _persist_message(conv_id, tenant_id, "in", "user", body)
                 # Build tools + adapter OUTSIDE any DB session (GOTCHAS §1).
@@ -300,8 +314,33 @@ async def process(entry, bus, redis):
                 reply, ctx_updates = await run_agent_loop(
                     body, llm, tools, system_prompt=skill.playbook_md or None
                 )
-                # Persist the outbound reply.
-                await _persist_message(conv_id, tenant_id, "out", "assistant", reply)
+
+        # ── C12: Guard pipeline ──────────────────────────────────────────
+        # Run every reply through the ordered guard pipeline. Results are
+        # advisory — we log them and publish them alongside the reply so
+        # downstream consumers (API, sender, analytics) can take action.
+        from cante.guards import GuardContext, GuardPipeline
+
+        guard_pipeline = GuardPipeline()
+        guard_results = await guard_pipeline.run(GuardContext(
+            user_message=body,
+            reply=reply,
+            scope=skill_scope,
+        ))
+        for gr in guard_results:
+            if not gr.passed:
+                logger.info(
+                    "worker.guard_fired",
+                    reason=gr.reason,
+                    action=gr.action,
+                    conv=cid,
+                )
+            if gr.action == "escalate":
+                reply = gr.reason  # Surface escalation reason
+
+        # Persist the outbound reply (only in real-LLM mode).
+        if settings.worker_llm_enabled and route is not None:
+            await _persist_message(conv_id, tenant_id, "out", "assistant", reply)
 
         await bus.publish(S_OUT, {
             "conversation_id": cid,
@@ -312,6 +351,12 @@ async def process(entry, bus, redis):
         })
         logger.info("worker.processed", conv=cid)
     finally:
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
         await redis.delete(lock)
 
 
