@@ -2,6 +2,7 @@
 
 from typing import Literal
 
+import httpx
 import structlog
 
 from cante.settings import settings
@@ -15,6 +16,13 @@ class EvolutionAdapter:
     def __init__(self, base_url: str | None = None, api_key: str | None = None):
         self._base_url = (base_url or settings.evolution_base_url).rstrip("/")
         self._api_key = api_key or settings.evolution_api_key
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(30.0),
+            limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+        )
+
+    async def close(self) -> None:
+        await self._client.aclose()
 
     async def parse_webhook(self, raw: dict) -> list:
 
@@ -70,104 +78,96 @@ class EvolutionAdapter:
         )
 
     async def send_text(self, number_config: dict, to: str, text: str):
-        import httpx
-
         instance = number_config.get("instance", number_config.get("phone", ""))
         url = f"{self._base_url}/message/sendText/{instance}"
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
-            resp = await client.post(
-                url,
-                headers={
-                    "apikey": self._api_key,
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "number": f"{to}@s.whatsapp.net",
-                    "text": text,
-                    "delay": 1200,
-                },
-            )
-            resp.raise_for_status()
-            result = resp.json()
-            from dataclasses import dataclass
+        resp = await self._client.post(
+            url,
+            headers={
+                "apikey": self._api_key,
+                "Content-Type": "application/json",
+            },
+            json={
+                "number": f"{to}@s.whatsapp.net",
+                "text": text,
+                "delay": 1200,
+            },
+            timeout=httpx.Timeout(15.0),
+        )
+        resp.raise_for_status()
+        result = resp.json()
+        from dataclasses import dataclass
 
-            @dataclass
-            class SentMessage:
-                provider_message_id: str
-                channel: str
+        @dataclass
+        class SentMessage:
+            provider_message_id: str
+            channel: str
 
-            return SentMessage(
-                provider_message_id=result.get("key", {}).get("id", ""),
-                channel="whatsapp_evolution",
-            )
+        return SentMessage(
+            provider_message_id=result.get("key", {}).get("id", ""),
+            channel="whatsapp_evolution",
+        )
 
     async def send_presence(
         self, number_config: dict, to: str, state: Literal["composing", "paused"]
     ) -> None:
-        import httpx
-
         instance = number_config.get("instance", number_config.get("phone", ""))
         url = f"{self._base_url}/chat/sendPresence/{instance}"
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
-            await client.post(
-                url,
-                headers={"apikey": self._api_key, "Content-Type": "application/json"},
-                json={"number": f"{to}@s.whatsapp.net", "presence": state},
-            )
+        await self._client.post(
+            url,
+            headers={"apikey": self._api_key, "Content-Type": "application/json"},
+            json={"number": f"{to}@s.whatsapp.net", "presence": state},
+            timeout=httpx.Timeout(10.0),
+        )
 
     async def connect(self, number_config: dict):
-        import httpx
-
         instance = number_config.get("instance", number_config.get("phone", ""))
         url = f"{self._base_url}/instance/connect/{instance}"
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
-            resp = await client.get(
-                url,
-                headers={"apikey": self._api_key},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            from dataclasses import dataclass
+        resp = await self._client.get(
+            url,
+            headers={"apikey": self._api_key},
+            timeout=httpx.Timeout(30.0),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        from dataclasses import dataclass
 
-            @dataclass
-            class ConnectResult:
-                qr_code: str
-                status: str
+        @dataclass
+        class ConnectResult:
+            qr_code: str
+            status: str
 
-            return ConnectResult(
-                qr_code=data.get("qrCode", data.get("base64", "")),
-                status="qr_pending",
-            )
+        return ConnectResult(
+            qr_code=data.get("qrCode", data.get("base64", "")),
+            status="qr_pending",
+        )
 
     async def status(self, number_config: dict):
-        import httpx
-
         instance = number_config.get("instance", number_config.get("phone", ""))
         url = f"{self._base_url}/instance/connectionState/{instance}"
 
-        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
-            resp = await client.get(
-                url,
-                headers={"apikey": self._api_key},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            from dataclasses import dataclass
+        resp = await self._client.get(
+            url,
+            headers={"apikey": self._api_key},
+            timeout=httpx.Timeout(10.0),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        from dataclasses import dataclass
 
-            @dataclass
-            class ConnectionStatus:
-                status: str
-                phone: str
-                instance_id: str
+        @dataclass
+        class ConnectionStatus:
+            status: str
+            phone: str
+            instance_id: str
 
-            return ConnectionStatus(
-                status=data.get("state", "disconnected"),
-                phone=number_config.get("phone", ""),
-                instance_id=instance,
-            )
+        return ConnectionStatus(
+            status=data.get("state", "disconnected"),
+            phone=number_config.get("phone", ""),
+            instance_id=instance,
+        )
 
     @staticmethod
     def _normalize(raw: str) -> str:

@@ -262,20 +262,71 @@ async def create_number(data: dict, principal: Principal = Depends(RequireRole("
 
 @app.get("/v1/numbers/{num_id}/qr")
 async def get_qr(num_id: str, principal: Principal = Depends(RequireRole("admin"))):
-    # S15: not yet wired to the Evolution gateway — fail honestly rather than
-    # return a fabricated internal URL that looks like a real QR.
-    raise HTTPException(501, "QR pairing not implemented; configure the channel via the Evolution API directly.")
+    """Fetch the current QR code for WhatsApp Web pairing.
+
+    Calls the Evolution API ``/instance/connect/{instance}`` endpoint which
+    returns a base64-encoded QR code when the instance is waiting for a scan.
+    """
+    from cante.evolution import EvolutionAdapter
+    from cante.models import Number
+
+    async with async_session_factory() as session:
+        number = await load_owned(session, Number, num_id, principal)
+        adapter = EvolutionAdapter()
+        try:
+            result = await adapter.connect(number.connection_config)
+            return {
+                "qr_code": result.qr_code,
+                "status": result.status,
+            }
+        except Exception as exc:
+            raise HTTPException(502, f"Evolution API unreachable: {exc}") from exc
 
 
 @app.post("/v1/numbers/{num_id}/connect")
 async def connect_number(num_id: str, principal: Principal = Depends(RequireRole("admin"))):
-    # S15: stub — label explicitly so callers don't assume a live connection.
-    raise HTTPException(501, "Number connect not implemented.")
+    """Initiate WhatsApp Web pairing for *num_id* via the Evolution gateway.
+
+    Returns the base64-encoded QR code the user must scan with WhatsApp.
+    """
+    from cante.evolution import EvolutionAdapter
+    from cante.models import Number
+
+    async with async_session_factory() as session:
+        number = await load_owned(session, Number, num_id, principal)
+        adapter = EvolutionAdapter()
+        try:
+            result = await adapter.connect(number.connection_config)
+            return {
+                "qr_code": result.qr_code,
+                "status": result.status,
+            }
+        except Exception as exc:
+            raise HTTPException(502, f"Evolution API unreachable: {exc}") from exc
 
 
 @app.post("/v1/numbers/{num_id}/disconnect")
 async def disconnect_number(num_id: str, principal: Principal = Depends(RequireRole("admin"))):
-    return {"status": "disconnected"}
+    """Disconnect *num_id* from the WhatsApp gateway.
+
+    The Evolution API does not expose a direct "disconnect" endpoint, so this
+    returns the current connection state as reported by the gateway.
+    """
+    from cante.evolution import EvolutionAdapter
+    from cante.models import Number
+
+    async with async_session_factory() as session:
+        number = await load_owned(session, Number, num_id, principal)
+        adapter = EvolutionAdapter()
+        try:
+            state = await adapter.status(number.connection_config)
+            return {
+                "status": state.status,
+                "phone": state.phone,
+                "instance_id": state.instance_id,
+            }
+        except Exception as exc:
+            raise HTTPException(502, f"Evolution API unreachable: {exc}") from exc
 
 
 # ── Bots ────────────────────────────────────────────────────────────
