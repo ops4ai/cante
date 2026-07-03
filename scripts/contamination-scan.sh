@@ -79,10 +79,13 @@ fi
 
 # --- 6.4 generic PII regex (PT mobile / email / IBAN) -----------------------
 # Sensitive patterns; deliberately excludes fixtures via the haystack build above.
+# First strip standard bot/no-reply emails (e.g. Co-Authored-By trailers) so
+# honest commit metadata doesn't trip the gate.
+grep -vE 'noreply@anthropic\.com|@users\.noreply\.github\.com' "$tmp/haystack.txt" > "$tmp/pii_hay.txt" 2>/dev/null || true
 PII_REGEX='(\+351[[:space:]]?)?9[1236][0-9]{7}|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|PT50[0-9]{21}'
-if grep -nE "$PII_REGEX" "$tmp/haystack.txt" >/dev/null 2>&1; then
+if grep -nE "$PII_REGEX" "$tmp/pii_hay.txt" >/dev/null 2>&1; then
   echo "PII-MATCH:"
-  grep -nE "$PII_REGEX" "$tmp/haystack.txt" | head -20
+  grep -nE "$PII_REGEX" "$tmp/pii_hay.txt" | head -20
   fail=1
 fi
 
