@@ -1,0 +1,26 @@
+# promote-deny.txt — paths that must NEVER be promoted upstream.
+# Deny wins: a file matching both allow and deny is blocked.
+# Club-specific overlay, secrets, runtime data, and local-only artifacts.
+
+# --- club overlay (the bespoke layer; lives only in the private fork) ---
+club/**
+coletiva-*/
+coletiva-**/
+
+# --- secrets & env ---
+.env
+.env.*
+*.local.*
+club-tokens.txt
+
+# --- runtime data / backups ---
+data/**
+backups/**
+
+# --- local-only internal reports (agent handoffs, audits) ---
+docs/reports/**
+
+# --- coverage / build artifacts ---
+**/.coverage
+**/htmlcov/**
+**/__pycache__/**

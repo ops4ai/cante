@@ -1,0 +1,56 @@
+# contamination.yml — universal contamination gate, versioned in the PUBLIC cante repo.
+#
+# Runs on every PR / push to main and rejects secrets or generic PII (PT mobile,
+# email, IBAN) in the added lines OR commit messages. This is the server-side
+# guarantee (the "suspenders") that survives a skipped local gate.
+#
+# It is deliberately UNIVERSAL: it does NOT know about any club's identity
+# (no club token list). Club-specific filtering happens only in the private fork.
+# The same scripts/contamination-scan.sh degrades to these universal checks
+# when club-tokens.txt is absent — which is the case here.
+#
+# Configure branch protection on `main` to require this check before merge.
+name: Contamination Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # need full history to diff against the base
+
+      - name: Install gitleaks
+        run: |
+          curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.16.0/gitleaks_8.16.0_linux_x64.tar.gz \
+            | tar xz -C /usr/local/bin gitleaks
+          gitleaks version
+
+      - name: Compute diff range
+        id: range
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "range=${{ github.event.pull_request.base.sha }}..HEAD" >> "$GITHUB_OUTPUT"
+          else
+            # push to main: scan the pushed commits
+            before="${{ github.event.before }}"
+            if [ "$before" = "0000000000000000000000000000000000000000" ]; then
+              # initial push — scan everything reachable in this push's new history
+              echo "range=HEAD~30..HEAD" >> "$GITHUB_OUTPUT"
+            else
+              echo "range=${before}..HEAD" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Contamination scan
+        run: |
+          chmod +x scripts/contamination-scan.sh scripts/match-globs.sh
+          # Ensure a base ref is fetched for the range to resolve.
+          git fetch origin main --depth=1000 2>/dev/null || true
+          scripts/contamination-scan.sh "${{ steps.range.outputs.range }}"

@@ -1,0 +1,72 @@
+# .gitleaks.toml — secret scanning for the contamination gate.
+# Self-contained (no `extends` of a bundled default) so behaviour is identical
+# in the local gate and in public CI. RE2 (Go) regex — NO lookaheads/lookbehinds.
+# Tuned for the cante stack: WhatsApp/Evolution tokens, OpenRouter/Anthropic/
+# DeepSeek keys, JWT secrets, Postgres connection URIs.
+#
+# Allowlist: obvious test/fake values so honest fixtures don't trip the gate.
+# A finding whose line matches an allowlist regex (or whose path matches an
+# allowlist path) is suppressed.
+
+title = "cante contamination gate"
+
+[allowlist]
+description = "obvious test/placeholder values and test paths"
+regexes = [
+  '''(?i)example\.com''',
+  '''(?i)ci-test''',
+  '''(?i)test-jwt''',
+  '''(?i)test-''',
+  '''(?i)placeholder''',
+  '''(?i)changeme''',
+  '''(?i)secret-key-for''',
+  '''aW5zZWN1cmU''',
+]
+paths = [
+  '''tests/.*''',
+  '''core/tests/.*''',
+  '''.*fixtures.*''',
+  '''.*\.example.*''',
+]
+
+[[rules]]
+id = "evolution-whatsapp-token"
+description = "Evolution API / WhatsApp token assignment"
+regex = '''(?i)(evolution[_-]?)?(api[_-]?key|token)["' :=]{1,4}[A-Za-z0-9]{16,}'''
+keywords = ["evolution", "whatsapp", "api_key", "apikey", "token"]
+
+[[rules]]
+id = "openrouter-key"
+description = "OpenRouter API key"
+regex = '''sk-or-[A-Za-z0-9_-]{20,}'''
+keywords = ["sk-or-"]
+
+[[rules]]
+id = "anthropic-key"
+description = "Anthropic-style API key"
+regex = '''sk-ant-[A-Za-z0-9_-]{20,}'''
+keywords = ["sk-ant-"]
+
+[[rules]]
+id = "deepseek-openai-key"
+description = "DeepSeek / OpenAI-style API key"
+regex = '''sk-[A-Za-z0-9]{32,}'''
+keywords = ["sk-"]
+
+[[rules]]
+id = "postgres-uri"
+description = "Postgres connection URI with credentials"
+regex = '''postgres(?:ql)?://[^:\s"']+:[^@\s"']+@[^\s"'/]+'''
+keywords = ["postgres"]
+
+[[rules]]
+id = "jwt-secret-assignment"
+description = "JWT secret assigned to a long value"
+regex = '''(?i)jwt[_-]?secret["' :=]{1,4}[A-Za-z0-9._\-/+=]{16,}'''
+keywords = ["jwt_secret", "jwtsecret"]
+
+[[rules]]
+id = "generic-api-key-assignment"
+description = "Generic API key / secret assignment"
+regex = '''(?i)(api[_-]?key|secret[_-]?key|client[_-]?secret|admin[_-]?password)["' :=]{1,4}[A-Za-z0-9._\-/+=]{20,}'''
+keywords = ["api_key", "apikey", "secret_key", "secretkey", "client_secret", "admin_password"]

@@ -36,3 +36,8 @@ docs/reports/
 # OS
 .DS_Store
 
+
+# Private fork overlay — NEVER publish
+club-tokens.txt
+club/
+coletiva-*/

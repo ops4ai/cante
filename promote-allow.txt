@@ -1,0 +1,33 @@
+# promote-allow.txt — paths that ARE part of the cante motor (promotable upstream).
+# A file is promotable only if it matches a pattern here AND matches nothing in
+# promote-deny.txt. gitignore-style globs (so '**' spans '/').
+# Edit freely; this is the allow-list that keeps club-specific code out of public.
+
+# --- motor source trees ---
+core/**
+services/**
+tests/**
+migrations/**
+frontend/**
+examples/**
+deploy/**
+docs/**
+seeds/**
+scripts/**
+.github/**
+
+# --- motor top-level files ---
+Makefile
+docker-compose.yml
+docker-compose.*.yml
+pytest.ini
+mypy.ini
+alembic.ini
+README.md
+CONTRIBUTING.md
+GOTCHAS.md
+LICENSE
+.gitignore
+.gitleaks.toml
+promote-allow.txt
+promote-deny.txt
