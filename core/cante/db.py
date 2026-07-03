@@ -98,9 +98,10 @@ async def resolve_provider_api_key(provider, session) -> str:
     if env_val:
         return env_val
     # Look up a Secret row by name and decrypt at rest.
+    from sqlalchemy import select
+
     from cante.models import Secret
     from cante.secrets import decrypt
-    from sqlalchemy import select
 
     secret = (
         await session.execute(select(Secret).where(Secret.name == provider.api_key_ref))
