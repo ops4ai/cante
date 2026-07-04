@@ -31,3 +31,6 @@ LICENSE
 .gitleaks.toml
 promote-allow.txt
 promote-deny.txt
+# Templates (placeholders, not real env) — explicitly allowed despite .env* deny.
+.env.example
+.env.*.example

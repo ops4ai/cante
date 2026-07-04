@@ -41,8 +41,13 @@ while IFS= read -r f; do
 done < "$tmp/files.txt"
 
 # --- build the haystacks -----------------------------------------------------
-# Full diff (for path/exclusion context) and added lines only, fixtures excluded.
-git diff "$RANGE" -- . ':(exclude)tests/**/fixtures/**' ':(exclude)core/tests/**' > "$tmp/diff.txt" 2>/dev/null || true
+# Full diff (for path/exclusion context) and added lines only.
+# Exclude: test fixtures, and template/example files (.env*, *.example, *.example.*)
+# which carry placeholder values (incl. plausible phone numbers) that are NOT data.
+git diff "$RANGE" -- . \
+  ':(exclude)tests/**/fixtures/**' ':(exclude)core/tests/**' \
+  ':(exclude).env*' ':(exclude)**/.env*' ':(exclude)**/*.example' ':(exclude)**/*.example.*' \
+  > "$tmp/diff.txt" 2>/dev/null || true
 git log --format=%B "$RANGE" > "$tmp/msgs.txt" 2>/dev/null || true
 # Added lines with the diff '+' marker stripped, so secret/PII patterns match clean text.
 grep '^+' "$tmp/diff.txt" | grep -v '^+++' | sed 's/^+//' > "$tmp/added.txt" 2>/dev/null || true

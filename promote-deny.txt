@@ -9,9 +9,13 @@ coletiva-**/
 
 # --- secrets & env ---
 .env
-.env.*
+.env.local
+.env.*.local
+.env.production
 *.local.*
 club-tokens.txt
+# NOTE: .env.example and .env.*.example are TEMPLATES — they belong to the motor
+# (handled in promote-allow.txt) and must NOT be denied.
 
 # --- runtime data / backups ---
 data/**
