@@ -21,6 +21,10 @@ regexes = [
   '''(?i)changeme''',
   '''(?i)secret-key-for''',
   '''aW5zZWN1cmU''',
+  # Connection strings that interpolate env vars (${VAR}) are templates, not
+  # secrets — e.g. postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@host:5432/db
+  # in docker-compose.yml. Suppress so the postgres-uri rule doesn't false-positive.
+  '''[a-z]+://\$\{[^}]+\}:\$\{[^}]+\}@''',
 ]
 paths = [
   '''tests/.*''',
