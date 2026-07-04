@@ -1,22 +1,41 @@
-name: cante
+# docker-compose.yml — cante, the motor.
+#
+# Instance isolation: set INSTANCE in .env to run several forks side-by-side on
+# the same host (e.g. cante-cds for a club, cante-ops4ai for the portal). When
+# INSTANCE is empty (default), everything is plain `cante*` exactly as before —
+# single-instance behaviour is unchanged. When INSTANCE is set (e.g. "cds"):
+#   - project name      -> cante-cds
+#   - container names   -> cante-cds-postgres, cante-cds-api, ...
+#   - network           -> cante-cds_net
+#   - postgres volume   -> cante-cds_postgres_data  (own data, own backups)
+# A second fork does NOT touch the first's containers, network, ports or data.
+# A new fork = copy the repo + set a unique INSTANCE + unique host ports in .env.
+#
+# S4/S17: no secrets are hardcoded here — everything sensitive is read from .env
+# (gitignored). Published ports bind to 127.0.0.1 so the DB, Redis, and services
+# are not exposed to the public network behind the edge proxy; put Cante behind a
+# reverse proxy (Traefik/nginx) for public ingress.
+#
+# Host ports are configurable via CANTE_<SERVICE>_PORT (default to the standard
+# ports below) so several instances can each expose on a unique host port.
 
-# S4/S17: no secrets are hardcoded here — everything sensitive is read from
-# the .env file (gitignored). Published ports bind to 127.0.0.1 so the DB,
-# Redis, and services are not exposed to the public network behind the edge
-# proxy; put Cante behind a reverse proxy (Traefik/nginx) for public ingress.
+name: ${INSTANCE:+cante-}${INSTANCE:-cante}
+
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: cante-postgres
+    container_name: ${INSTANCE:+cante-}${INSTANCE:-cante}-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:${CANTE_POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    networks:
+      - net
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
       interval: 5s
@@ -25,14 +44,16 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: cante-redis
+    container_name: ${INSTANCE:+cante-}${INSTANCE:-cante}-redis
     restart: unless-stopped
     environment:
       - REDIS_PASSWORD=${REDIS_PASSWORD}
     # S17: require a password when REDIS_PASSWORD is set; no auth in dev when empty.
     command: ["sh", "-c", "if [ -n \"$${REDIS_PASSWORD}\" ]; then redis-server --requirepass \"$${REDIS_PASSWORD}\"; else redis-server; fi"]
     ports:
-      - "127.0.0.1:6379:6379"
+      - "127.0.0.1:${CANTE_REDIS_PORT:-6379}:6379"
+    networks:
+      - net
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -43,7 +64,7 @@ services:
     build:
       context: .
       dockerfile: services/ingress/Dockerfile
-    container_name: cante-ingress
+    container_name: ${INSTANCE:+cante-}${INSTANCE:-cante}-ingress
     restart: unless-stopped
     env_file: .env
     environment:
@@ -55,13 +76,15 @@ services:
       redis:
         condition: service_healthy
     ports:
-      - "127.0.0.1:8001:8001"
+      - "127.0.0.1:${CANTE_INGRESS_PORT:-8001}:8001"
+    networks:
+      - net
 
   api:
     build:
       context: .
       dockerfile: services/api/Dockerfile
-    container_name: cante-api
+    container_name: ${INSTANCE:+cante-}${INSTANCE:-cante}-api
     restart: unless-stopped
     env_file: .env
     environment:
@@ -73,13 +96,15 @@ services:
       redis:
         condition: service_healthy
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${CANTE_API_PORT:-8000}:8000"
+    networks:
+      - net
 
   worker:
     build:
       context: .
       dockerfile: services/worker/Dockerfile
-    container_name: cante-worker
+    container_name: ${INSTANCE:+cante-}${INSTANCE:-cante}-worker
     restart: unless-stopped
     env_file: .env
     environment:
@@ -90,12 +115,14 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    networks:
+      - net
 
   sender:
     build:
       context: .
       dockerfile: services/sender/Dockerfile
-    container_name: cante-sender
+    container_name: ${INSTANCE:+cante-}${INSTANCE:-cante}-sender
     restart: unless-stopped
     env_file: .env
     environment:
@@ -104,12 +131,14 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    networks:
+      - net
 
   scheduler:
     build:
       context: .
       dockerfile: services/scheduler/Dockerfile
-    container_name: cante-scheduler
+    container_name: ${INSTANCE:+cante-}${INSTANCE:-cante}-scheduler
     restart: unless-stopped
     env_file: .env
     environment:
@@ -120,25 +149,36 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    networks:
+      - net
 
   evolution:
     image: atendai/evolution-api:latest
-    container_name: cante-evolution
+    container_name: ${INSTANCE:+cante-}${INSTANCE:-cante}-evolution
     restart: unless-stopped
     environment:
       - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY}
       - LANGUAGE=en
     ports:
-      - "127.0.0.1:8088:8080"
+      - "127.0.0.1:${CANTE_EVOLUTION_PORT:-8088}:8080"
+    networks:
+      - net
 
   mock-backend:
     build:
       context: ./examples/mock-backend
       dockerfile: Dockerfile
-    container_name: cante-mock-backend
+    container_name: ${INSTANCE:+cante-}${INSTANCE:-cante}-mock-backend
     restart: unless-stopped
     ports:
-      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:${CANTE_MOCK_PORT:-9000}:9000"
+    networks:
+      - net
+
+networks:
+  net:
+    name: ${INSTANCE:+cante-}${INSTANCE:-cante}_net
 
 volumes:
   postgres_data:
+    name: ${INSTANCE:+cante-}${INSTANCE:-cante}_postgres_data
