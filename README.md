@@ -26,7 +26,7 @@ make up
 make seed
 ```
 
-Open http://localhost:8080, log in, connect a WhatsApp number by QR code, and message it.
+Open **http://localhost:5173** — that's the backoffice UI (a placeholder page for now; the full backoffice lands in M4–M5). The REST API it talks to is live at http://localhost:8000/v1/. To connect a WhatsApp number by QR code today, use the API: `POST /v1/auth/login` → `POST /v1/numbers` → `GET /v1/numbers/{id}/qr` (scan with your phone) → `POST /v1/numbers/{id}/connect`.
 
 ## Vocabulary
 

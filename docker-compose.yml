@@ -193,6 +193,19 @@ services:
     networks:
       - net
 
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ${INSTANCE:+cante-}${INSTANCE:-cante}-frontend
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "127.0.0.1:${CANTE_FRONTEND_PORT:-5173}:80"
+    networks:
+      - net
+
   mock-backend:
     build:
       context: ./examples/mock-backend
