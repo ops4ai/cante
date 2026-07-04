@@ -90,6 +90,10 @@ services:
     environment:
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      # cante is installed (non-editable) into site-packages in the image, so the
+      # __file__-relative heuristic in _alembic_cfg() resolves to /usr/local/lib
+      # and misses migrations/. Point it at the repo copy in the image instead.
+      - CANTE_ALEMBIC_INI=/app/alembic.ini
     depends_on:
       postgres:
         condition: service_healthy
@@ -110,6 +114,7 @@ services:
     environment:
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - CANTE_ALEMBIC_INI=/app/alembic.ini
     depends_on:
       postgres:
         condition: service_healthy
@@ -144,6 +149,7 @@ services:
     environment:
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - CANTE_ALEMBIC_INI=/app/alembic.ini
     depends_on:
       postgres:
         condition: service_healthy
@@ -159,10 +165,31 @@ services:
     container_name: ${INSTANCE:+cante-}${INSTANCE:-cante}-evolution
     restart: unless-stopped
     environment:
+      # Auth (shared with the cante api via EVOLUTION_API_KEY in .env).
       - AUTHENTICATION_API_KEY=${EVOLUTION_API_KEY}
       - LANGUAGE=en
+      # v2.3.x requires its own DB provider + connection (Prisma). Reuses the
+      # shared cante postgres under a separate 'evolution_api' schema so the two
+      # never collide (cante = SQLAlchemy/alembic, evolution = Prisma).
+      - SERVER_URL=http://${INSTANCE:+cante-}${INSTANCE:-cante}-evolution:8080
+      - DATABASE_PROVIDER=postgresql
+      - DATABASE_CONNECTION_URI=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=evolution_api
+      - DATABASE_SAVE_DATA_INSTANCE=true
+      - DATABASE_SAVE_DATA_NEW_MESSAGE=true
+      - DATABASE_SAVE_MESSAGE_UPDATE=true
+      - DATABASE_SAVE_DATA_CONTACTS=true
+      # v2.3.x requires a Redis cache. Reuses the shared cante redis on db 1 so
+      # it does not clash with cante's db 0 keys.
+      - CACHE_REDIS_ENABLED=true
+      - CACHE_REDIS_URI=redis://redis:6379/1
+      - CACHE_REDIS_PREFIX_KEY=evolution
     ports:
       - "127.0.0.1:${CANTE_EVOLUTION_PORT:-8088}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
       - net
 
