@@ -3,7 +3,7 @@
 #
 # This list is for sensitive paths that live UNDER motor trees but must not go
 # public (secrets, runtime data, local reports). Fork-specific overlays (whatever
-# a fork names them — club/, coletiva/, instance/, …) are already blocked by the
+# a fork names them — overlay/, local/, instance/, …) are already blocked by the
 # allow-list in promote-allow.txt, so they don't need to be named here. Keeping
 # this list neutral is what lets the motor be reused by any fork.
 
