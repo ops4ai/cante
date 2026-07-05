@@ -22,9 +22,12 @@ export function Sidebar() {
     }`
   return (
     <aside className="flex h-full w-56 flex-col border-r border-gray-200 bg-white">
-      <div className="px-4 py-4">
-        <div className="text-lg font-bold text-brand-700">Cante</div>
-        <div className="text-xs text-gray-400">backoffice</div>
+      <div className="flex items-center gap-2 px-4 py-4">
+        <img src="/icon.svg" alt="Cante" className="h-8 w-8" />
+        <div>
+          <div className="text-lg font-bold text-brand-700">Cante</div>
+          <div className="text-xs text-gray-400">backoffice</div>
+        </div>
       </div>
       <nav className="flex-1 space-y-1 px-2">
         {items.map((it) => (

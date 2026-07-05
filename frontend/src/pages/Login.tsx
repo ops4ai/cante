@@ -31,9 +31,12 @@ export function Login() {
   return (
     <div className="flex min-h-screen items-center justify-center bg-gray-50 p-4">
       <form onSubmit={onSubmit} className="w-full max-w-sm rounded-lg bg-white p-6 shadow-md">
-        <div className="mb-4">
-          <div className="text-2xl font-bold text-brand-700">Cante</div>
-          <div className="text-sm text-gray-500">Sign in to the backoffice</div>
+        <div className="mb-4 flex items-center gap-3">
+          <img src="/icon.svg" alt="Cante" className="h-10 w-10" />
+          <div>
+            <div className="text-2xl font-bold text-brand-700">Cante</div>
+            <div className="text-sm text-gray-500">Sign in to the backoffice</div>
+          </div>
         </div>
         <div className="space-y-3">
           <Field label="Email">
