@@ -4,10 +4,10 @@
 # email, IBAN) in the added lines OR commit messages. This is the server-side
 # guarantee (the "suspenders") that survives a skipped local gate.
 #
-# It is deliberately UNIVERSAL: it does NOT know about any club's identity
-# (no club token list). Club-specific filtering happens only in the private fork.
-# The same scripts/contamination-scan.sh degrades to these universal checks
-# when club-tokens.txt is absent — which is the case here.
+# It is deliberately UNIVERSAL: it does NOT know about any fork's identity
+# (no identity-token list). Fork-specific filtering happens only in the private
+# fork. The same scripts/contamination-scan.sh degrades to these universal
+# checks when identity-tokens.txt is absent — which is the case here.
 #
 # Configure branch protection on `main` to require this check before merge.
 name: Contamination Gate

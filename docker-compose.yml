@@ -1,7 +1,7 @@
 # docker-compose.yml — cante, the motor.
 #
 # Instance isolation: set INSTANCE in .env to run several forks side-by-side on
-# the same host (e.g. cante-cds for a club, cante-ops4ai for the portal). When
+# the same host (e.g. one fork per deployment — cante-cds, cante-ops4ai, …). When
 # INSTANCE is empty (default), everything is plain `cante*` exactly as before —
 # single-instance behaviour is unchanged. When INSTANCE is set (e.g. "cds"):
 #   - project name      -> cante-cds

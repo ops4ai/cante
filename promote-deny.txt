@@ -1,11 +1,11 @@
-# promote-deny.txt — paths that must NEVER be promoted upstream.
+# promote-deny.txt — motor-internal paths that must NEVER be promoted upstream.
 # Deny wins: a file matching both allow and deny is blocked.
-# Club-specific overlay, secrets, runtime data, and local-only artifacts.
-
-# --- club overlay (the bespoke layer; lives only in the private fork) ---
-club/**
-coletiva-*/
-coletiva-**/
+#
+# This list is for sensitive paths that live UNDER motor trees but must not go
+# public (secrets, runtime data, local reports). Fork-specific overlays (whatever
+# a fork names them — club/, coletiva/, instance/, …) are already blocked by the
+# allow-list in promote-allow.txt, so they don't need to be named here. Keeping
+# this list neutral is what lets the motor be reused by any fork.
 
 # --- secrets & env ---
 .env
@@ -13,7 +13,6 @@ coletiva-**/
 .env.*.local
 .env.production
 *.local.*
-club-tokens.txt
 # NOTE: .env.example and .env.*.example are TEMPLATES — they belong to the motor
 # (handled in promote-allow.txt) and must NOT be denied.
 

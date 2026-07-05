@@ -1,7 +1,8 @@
 # promote-allow.txt — paths that ARE part of the cante motor (promotable upstream).
 # A file is promotable only if it matches a pattern here AND matches nothing in
 # promote-deny.txt. gitignore-style globs (so '**' spans '/').
-# Edit freely; this is the allow-list that keeps club-specific code out of public.
+# This is the allow-list: anything NOT listed here is blocked from promotion, so
+# a fork's bespoke overlay (whatever it's named) can never leak upstream.
 
 # --- motor source trees ---
 core/**

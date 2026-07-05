@@ -6,9 +6,9 @@
 # Deny-wins across layers:
 #   6.1 path allow/deny (promote-allow.txt / promote-deny.txt)
 #   6.2 secret scan (gitleaks, .gitleaks.toml)
-#   6.3 club token denylist (club-tokens.txt, PRIVATE — only runs if present;
-#       its absence makes this script degrade to the universal checks, so the
-#       SAME script serves as the universal gate in public CI)
+#   6.3 identity-token denylist (identity-tokens.txt, PRIVATE — only runs if
+#       present; its absence makes this script degrade to the universal checks,
+#       so the SAME script serves as the universal gate in public CI)
 #   6.4 generic PII regex (PT mobile, email, IBAN) — excludes test fixtures
 #   6.5 commit MESSAGES scanned too, not just diffs
 #
@@ -69,17 +69,19 @@ elif [ "$gl_rc" -ne 0 ]; then
   fail=1
 fi
 
-# --- 6.3 club token denylist (PRIVATE layer; skips if file absent) ----------
-if [ -f club-tokens.txt ]; then
+# --- 6.3 identity-token denylist (PRIVATE layer; skips if file absent) --------
+# A fork keeps identity-tokens.txt (names, domains, phone of ITS org) locally;
+# the public CI never has it, so the same script degrades to universal checks.
+if [ -f identity-tokens.txt ]; then
   while IFS= read -r tok; do
     tok="${tok%%#*}"          # strip inline comments
     tok="$(echo "$tok" | xargs)"  # trim whitespace
     [ -z "$tok" ] && continue
     if grep -iF -- "$tok" "$tmp/haystack.txt" >/dev/null 2>&1; then
-      echo "CLUB-TOKEN:      $tok"
+      echo "IDENTITY-TOKEN: $tok"
       fail=1
     fi
-  done < club-tokens.txt
+  done < identity-tokens.txt
 fi
 
 # --- 6.4 generic PII regex (PT mobile / email / IBAN) -----------------------

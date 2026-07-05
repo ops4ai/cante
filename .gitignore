@@ -37,7 +37,5 @@ docs/reports/
 .DS_Store
 
 
-# Private fork overlay — NEVER publish
-club-tokens.txt
-club/
-coletiva-*/
+# (Forks keep their own private overlay + identity denylist in their own
+# .gitignore additions; the motor has nothing fork-specific to ignore here.)
