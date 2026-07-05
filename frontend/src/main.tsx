@@ -1,13 +1,29 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
+import { BrowserRouter } from 'react-router-dom'
+import { QueryClient, QueryClientProvider } from 'react-query'
+import App from './App'
+import { AuthProvider } from './auth/AuthContext'
+import './index.css'
 
-function App() {
-  return (
-    <div style={{padding: 40, fontFamily: 'system-ui'}}>
-      <h1>Cante</h1>
-      <p>Backoffice coming in M4-M5. API already live at <code>/v1/</code>.</p>
-    </div>
-  )
-}
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      retry: 1,
+      refetchOnWindowFocus: false,
+      staleTime: 10_000,
+    },
+  },
+})
 
-ReactDOM.createRoot(document.getElementById('root')!).render(<React.StrictMode><App /></React.StrictMode>)
+ReactDOM.createRoot(document.getElementById('root')!).render(
+  <React.StrictMode>
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </BrowserRouter>
+    </QueryClientProvider>
+  </React.StrictMode>,
+)
