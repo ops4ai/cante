@@ -396,14 +396,31 @@ async def list_numbers(cursor: str = "", limit: int = DEFAULT_PAGE_SIZE, princip
 
 @app.post("/v1/numbers")
 async def create_number(data: NumberCreateIn, principal: Principal = Depends(RequireRole("admin"))):
+    from cante.evolution import EvolutionAdapter, instance_name_for
     from cante.models import Number
     async with async_session_factory() as session:
-        n = Number(phone=data.phone, display_name=data.display_name, channel_type=data.channel_type)
+        instance = instance_name_for(data.phone)
+        connection_config = {"instance": instance, "phone": data.phone}
+        n = Number(
+            phone=data.phone,
+            display_name=data.display_name,
+            channel_type=data.channel_type,
+            connection_config=connection_config,
+        )
         session.add(n)
         await session.flush()
-        await log_audit(session, principal, "number.create", f"number:{n.id}", after={"phone": n.phone, "channel_type": n.channel_type})
+        # Provision the Evolution instance now so /qr (instance/connect) works.
+        # Provisioning failures are surfaced as a 502 (don't silently save a
+        # Number whose QR can never be fetched).
+        try:
+            adapter = EvolutionAdapter()
+            await adapter.create_instance(instance)
+        except Exception as exc:
+            await session.rollback()
+            raise HTTPException(502, f"Evolution instance create failed: {exc}") from exc
+        await log_audit(session, principal, "number.create", f"number:{n.id}", after={"phone": n.phone, "channel_type": n.channel_type, "instance": instance})
         await session.commit()
-        return {"id": n.id, "phone": n.phone, "status": n.status}
+        return {"id": n.id, "phone": n.phone, "status": n.status, "instance": instance}
 
 
 @app.get("/v1/numbers/{num_id}/qr")

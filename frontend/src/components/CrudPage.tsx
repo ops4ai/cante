@@ -144,13 +144,13 @@ function FormModal({ title, fields, initial, onSubmit, onClose, submitting, erro
         {fields.map((f) => (
           <Field key={f.name} label={f.label}>
             {f.type === 'textarea' ? (
-              <textarea className={inputCls} rows={4} value={String(values[f.name] ?? '')} placeholder={f.placeholder} onChange={(e) => set(f.name, e.target.value)} />
+              <textarea className={`${inputCls} font-mono text-xs`} rows={16} value={String(values[f.name] ?? '')} placeholder={f.placeholder} onChange={(e) => set(f.name, e.target.value)} />
             ) : f.type === 'select' ? (
               <select className={inputCls} value={String(values[f.name] ?? '')} onChange={(e) => set(f.name, e.target.value)}>
                 {f.options?.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
               </select>
             ) : f.type === 'json' ? (
-              <textarea className={inputCls} rows={3} value={String(values[f.name] ?? '')} placeholder='{"key":"value"}' onChange={(e) => set(f.name, e.target.value)} />
+              <textarea className={`${inputCls} font-mono text-xs`} rows={8} value={String(values[f.name] ?? '')} placeholder='{"key":"value"}' onChange={(e) => set(f.name, e.target.value)} />
             ) : (
               <input className={inputCls} type={f.type === 'number' ? 'number' : 'text'} value={String(values[f.name] ?? '')} placeholder={f.placeholder} onChange={(e) => set(f.name, f.type === 'number' ? Number(e.target.value) : e.target.value)} />
             )}

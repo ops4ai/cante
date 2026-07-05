@@ -39,3 +39,6 @@ docs/reports/
 
 # (Forks keep their own private overlay + identity denylist in their own
 # .gitignore additions; the motor has nothing fork-specific to ignore here.)
+
+# Editor / agent artifacts (never publish)
+.claude/

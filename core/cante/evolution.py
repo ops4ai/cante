@@ -1,5 +1,6 @@
 """WhatsApp channel adapter — Evolution API implementation of ChannelAdapter."""
 
+import uuid
 from typing import Literal
 
 import httpx
@@ -117,6 +118,26 @@ class EvolutionAdapter:
         )
         resp.raise_for_status()
 
+    async def create_instance(self, instance: str) -> dict:
+        """Create a WhatsApp-Baileys instance in Evolution (v2.3+).
+
+        ``POST /instance/create`` requires an ``integration`` field; the instance
+        must exist before ``/instance/connect/{instance}`` can return a QR.
+        Returns the raw response. Idempotent: a 400 "already exists" is treated
+        as success so re-creating a Number is safe.
+        """
+        url = f"{self._base_url}/instance/create"
+        resp = await self._client.post(
+            url,
+            headers={"apikey": self._api_key, "Content-Type": "application/json"},
+            json={"instanceName": instance, "qrcode": True, "integration": "WHATSAPP-BAILEYS"},
+            timeout=httpx.Timeout(30.0),
+        )
+        if resp.status_code == 400 and "exist" in resp.text.lower():
+            return {"instance": {"instanceName": instance, "status": "exists"}}
+        resp.raise_for_status()
+        return resp.json()
+
     async def connect(self, number_config: dict):
         from cante.channel import ConnectResult
 
@@ -159,3 +180,15 @@ class EvolutionAdapter:
         for suffix in ("@s.whatsapp.net", "@g.us", "@c.us"):
             raw = raw.replace(suffix, "")
         return raw
+
+
+def instance_name_for(phone: str) -> str:
+    """Build a valid Evolution instance name from a phone number.
+
+    Evolution instance names are lowercase alphanumerics; a raw phone like
+    ``+351900000000`` is invalid (``+``). Slug to ``cante351900000000``.
+    """
+    import re
+
+    digits = re.sub(r"[^0-9]", "", phone or "")
+    return f"cante{digits}" if digits else f"cante{uuid.uuid4().hex[:8]}"

@@ -20,6 +20,11 @@ on:
 
 jobs:
   scan:
+    # Only run on the PUBLIC motor repo. Forks inherit this workflow file but
+    # their own pushes (which legitimately include fork-only files like an
+    # nginx override or .claude/ commands) must not be blocked by the motor's
+    # allow-list — the gate is a fork→public guard, not a fork-internal one.
+    if: github.repository == 'ops4ai/cante'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
