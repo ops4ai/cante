@@ -26,7 +26,13 @@ make up
 make seed
 ```
 
-Open **http://localhost:5173** — that's the backoffice UI (a placeholder page for now; the full backoffice lands in M4–M5). The REST API it talks to is live at http://localhost:8000/v1/. To connect a WhatsApp number by QR code today, use the API: `POST /v1/auth/login` → `POST /v1/numbers` → `GET /v1/numbers/{id}/qr` (scan with your phone) → `POST /v1/numbers/{id}/connect`.
+Open **http://localhost:5173** in your browser and log in with the `ADMIN_EMAIL` / `ADMIN_PASSWORD` you set in `.env`. From the backoffice you can:
+
+- **Numbers** — create a number, click **QR**, scan it with your phone's WhatsApp, and connect it.
+- **Conversations** — watch incoming messages arrive live (auto-refresh) and take over a conversation as a human when needed.
+- **Bots / Skills / Providers / Routes** — configure your agents and how numbers route to them.
+
+The REST API is also directly available at http://localhost:8000/v1/ (`/healthz` for a health check).
 
 ## Vocabulary
 
