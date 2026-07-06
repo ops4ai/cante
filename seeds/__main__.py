@@ -23,16 +23,30 @@ Or at the skill level (fallback for every declared tool in that skill)::
 Without ``allowed_hosts``, tools can only reach public internet hosts
 that pass the default is_safe_url checks.
 """
-import asyncio, json, os, sys
+import asyncio
+import json
+import os
+import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 async def seed():
     from cante.auth import hash_password
     from cante.db import async_session_factory
-    from cante.models import SEEDED_TENANT, Bot, Number, Provider, Route, Secret, Skill, User
+    from cante.models import SEEDED_TENANT, Bot, Number, Provider, Route, Skill, User
     from cante.settings import settings
     from cante.tenant import with_tenant
     from sqlalchemy import select
+
+    def booking_tools():
+        """Two HTTP tools every appointment-based front desk shares: check open
+        slots and book an appointment, both against the demo mock-backend."""
+        return {
+            "builtin": ["lookup_or_create_contact", "close_conversation", "escalate_to_human"],
+            "declared": [
+                {"name": "get_open_slots", "description": "Check available appointment slots for a date", "input_schema": {"type": "object", "properties": {"date": {"type": "string"}}, "required": ["date"]}, "http": {"method": "GET", "url": "http://mock-backend:9000/availability?date={date}", "headers": {}, "timeout_s": 10, "allowed_hosts": ["mock-backend"]}, "response_mapping": "json"},
+                {"name": "book_appointment", "description": "Book an appointment", "input_schema": {"type": "object", "properties": {"date": {"type": "string"}, "time": {"type": "string"}, "name": {"type": "string"}}, "required": ["date", "time", "name"]}, "http": {"method": "POST", "url": "http://mock-backend:9000/appointments", "headers": {"Content-Type": "application/json"}, "timeout_s": 10, "allowed_hosts": ["mock-backend"]}, "response_mapping": "json"},
+            ],
+        }
 
     if settings.admin_password == "change-me":
         raise SystemExit(
@@ -103,22 +117,75 @@ async def seed():
                 ))
                 print("✓ Operations skill created")
 
-            # Preset: Barber
-            existing = (await session.execute(select(Skill).where(Skill.name == "Barber Shop Front Desk"))).scalar_one_or_none()
+            # Preset: Hairdresser (was "barber")
+            existing = (await session.execute(select(Skill).where(Skill.name == "Hair Salon Front Desk"))).scalar_one_or_none()
             if not existing:
                 session.add(Skill(
-                    name="Barber Shop Front Desk", preset="barber", language_default="en",
-                    playbook_md="## Who you are\nYou are the front desk of a barber shop. You help customers book, cancel, and inquire about appointments.\n\n## What you can do\n- Check available slots\n- Book appointments\n- Cancel appointments\n- Answer questions about services and prices\n\n## Tone\nCasual, friendly, like a neighborhood barber.",
-                    guardrails_md="Only discuss appointments, services, hours, prices, and location. Politely refuse anything else.",
-                    scope={"in": ["appointments","services","hours","prices","location","barber","haircut","booking"], "out_policy": "redirect_then_escalate", "max_offscope_turns": 2},
-                    tools={"builtin": ["lookup_or_create_contact","close_conversation","escalate_to_human"], "declared": [
-                        {"name":"get_open_slots","description":"Check available appointment slots for a date","input_schema":{"type":"object","properties":{"date":{"type":"string"}},"required":["date"]},"http":{"method":"GET","url":"http://mock-backend:9000/availability?date={date}","headers":{},"timeout_s":10,"allowed_hosts":["mock-backend"]},"response_mapping":"json"},
-                        {"name":"book_appointment","description":"Book an appointment","input_schema":{"type":"object","properties":{"date":{"type":"string"},"time":{"type":"string"},"name":{"type":"string"}},"required":["date","time","name"]},"http":{"method":"POST","url":"http://mock-backend:9000/appointments","headers":{"Content-Type":"application/json"},"timeout_s":10,"allowed_hosts":["mock-backend"]},"response_mapping":"json"},
-                    ]},
+                    name="Hair Salon Front Desk", preset="hairdresser", language_default="en",
+                    playbook_md="## Who you are\nYou are the front desk of a hair salon. You help clients book, cancel, and inquire about appointments and services.\n\n## What you can do\n- Check available slots\n- Book and cancel appointments\n- Describe services (haircut, colour, highlights, treatment, blow-dry)\n- Answer questions about prices, hours, and location\n\n## Tone\nCasual, friendly, like a neighbourhood salon. Suggest a slot proactively.",
+                    guardrails_md="Only discuss appointments, services, hours, prices, and location. Do not give hair-care or colouring advice — offer to book a stylist instead. Politely refuse anything else.",
+                    scope={"in": ["appointments", "services", "hours", "prices", "location", "haircut", "colour", "color", "highlights", "treatment", "blow-dry", "booking", "salon"], "out_policy": "redirect_then_escalate", "max_offscope_turns": 2},
+                    tools=booking_tools(),
                     done_condition="An appointment is confirmed.",
-                    escalation={"on":["explicit_request"],"message":"Let me transfer you to the barber."},
+                    escalation={"on": ["explicit_request"], "message": "Let me hand you to a stylist."},
                 ))
-                print("✓ Barber skill created")
+                print("✓ Hairdresser skill created")
+
+            # Preset: Beautician
+            existing = (await session.execute(select(Skill).where(Skill.name == "Beauty Salon Front Desk"))).scalar_one_or_none()
+            if not existing:
+                session.add(Skill(
+                    name="Beauty Salon Front Desk", preset="beautician", language_default="en",
+                    playbook_md="## Who you are\nYou are the receptionist of a beauty salon. You help clients book treatments and answer questions about services.\n\n## What you can do\n- Check available slots and book/cancel appointments\n- Describe treatments (facial, manicure, pedicure, waxing, lashes, makeup)\n- Answer questions about prices, duration, hours, and location\n\n## Tone\nWarm, professional, and welcoming.",
+                    guardrails_md="Only discuss treatments, prices, hours, location, and booking. Do not give skin-care or medical advice — recommend a consultation. Politely refuse anything else.",
+                    scope={"in": ["appointments", "treatments", "facial", "manicure", "pedicure", "waxing", "lashes", "makeup", "prices", "hours", "location", "booking"], "out_policy": "redirect_then_escalate", "max_offscope_turns": 2},
+                    tools=booking_tools(),
+                    done_condition="An appointment is confirmed.",
+                    escalation={"on": ["explicit_request"], "message": "Let me get a beautician to help you."},
+                ))
+                print("✓ Beautician skill created")
+
+            # Preset: Handyman
+            existing = (await session.execute(select(Skill).where(Skill.name == "Handyman Service Desk"))).scalar_one_or_none()
+            if not existing:
+                session.add(Skill(
+                    name="Handyman Service Desk", preset="handyman", language_default="en",
+                    playbook_md="## Who you are\nYou are the dispatcher for a home-repair handyman service. You help clients describe their problem, check visit windows, and book a visit.\n\n## What you can do\n- Describe services (plumbing, electrical, painting, carpentry, tiling, general repairs)\n- Give rough price ranges (final quote is on-site)\n- Check available visit windows and book a visit\n- Answer questions about hours and service area\n\n## Tone\nPractical, straightforward, reassuring. Ask what needs fixing if unclear.",
+                    guardrails_md="Only discuss services, rough pricing, visit windows, hours, and service area. Do not give DIY instructions or wiring/plumbing advice over chat — book a visit. Politely refuse anything else.",
+                    scope={"in": ["plumbing", "electrical", "painting", "carpentry", "tiling", "repairs", "leak", "tap", "switch", "door", "window", "visit", "quote", "hours", "area", "booking"], "out_policy": "redirect_then_escalate", "max_offscope_turns": 2},
+                    tools=booking_tools(),
+                    done_condition="A visit is booked.",
+                    escalation={"on": ["explicit_request"], "message": "Let me get the handyman to call you."},
+                ))
+                print("✓ Handyman skill created")
+
+            # Preset: Tutor
+            existing = (await session.execute(select(Skill).where(Skill.name == "Tutoring Service Desk"))).scalar_one_or_none()
+            if not existing:
+                session.add(Skill(
+                    name="Tutoring Service Desk", preset="tutor", language_default="en",
+                    playbook_md="## Who you are\nYou are the assistant for a tutoring service. You help students and parents book sessions and learn about subjects and levels.\n\n## What you can do\n- Describe subjects and levels offered (maths, languages, sciences, exam prep)\n- Check available session slots and book/cancel\n- Answer questions about pricing, materials, and online vs in-person\n\n## Tone\nPatient, encouraging, and clear.",
+                    guardrails_md="Only discuss subjects, levels, sessions, materials, pricing, and booking. Do not solve homework or give academic answers over chat — book a session. Politely refuse anything else.",
+                    scope={"in": ["tutoring", "subjects", "maths", "languages", "sciences", "exam", "levels", "sessions", "materials", "online", "in-person", "pricing", "booking"], "out_policy": "redirect_then_escalate", "max_offscope_turns": 2},
+                    tools=booking_tools(),
+                    done_condition="A session is booked.",
+                    escalation={"on": ["explicit_request"], "message": "Let me put you in touch with a tutor."},
+                ))
+                print("✓ Tutor skill created")
+
+            # Preset: Personal Trainer
+            existing = (await session.execute(select(Skill).where(Skill.name == "Personal Trainer Desk"))).scalar_one_or_none()
+            if not existing:
+                session.add(Skill(
+                    name="Personal Trainer Desk", preset="personal_trainer", language_default="en",
+                    playbook_md="## Who you are\nYou are the assistant for a personal trainer. You help clients book sessions, learn about programmes, and check availability.\n\n## What you can do\n- Describe programmes (strength, weight loss, conditioning, mobility, nutrition guidance)\n- Check available session slots and book/cancel\n- Answer questions about packages, pricing, and location (gym / home / online)\n\n## Tone\nMotivating, energetic, and supportive.",
+                    guardrails_md="Only discuss programmes, sessions, packages, pricing, availability, and location. Do not give personalised training or nutrition plans over chat — book a session for an assessment. Politely refuse anything else.",
+                    scope={"in": ["training", "fitness", "strength", "weight loss", "conditioning", "mobility", "nutrition", "sessions", "packages", "pricing", "gym", "home", "online", "booking"], "out_policy": "redirect_then_escalate", "max_offscope_turns": 2},
+                    tools=booking_tools(),
+                    done_condition="A session is booked.",
+                    escalation={"on": ["explicit_request"], "message": "Let me get the trainer to contact you."},
+                ))
+                print("✓ Personal Trainer skill created")
 
             # Preset: Trainer
             existing = (await session.execute(select(Skill).where(Skill.name == "Youth Sports Trainer"))).scalar_one_or_none()

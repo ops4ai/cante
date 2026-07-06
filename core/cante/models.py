@@ -81,7 +81,7 @@ class Skill(Base, TenantScoped):
     id: Mapped[str] = mapped_column(UUID(as_uuid=False), primary_key=True, default=_uuid)
     # tenant_id is contributed by the TenantScoped mixin (see top of file).
     name: Mapped[str] = mapped_column(String(200), nullable=False)
-    preset: Mapped[str] = mapped_column(String(30), default="custom")  # operations|barber|trainer|custom
+    preset: Mapped[str] = mapped_column(String(30), default="custom")  # see seeds for presets
     language_default: Mapped[str] = mapped_column(String(10), default="en")
     playbook_md: Mapped[str] = mapped_column(Text, default="")
     guardrails_md: Mapped[str] = mapped_column(Text, default="")
