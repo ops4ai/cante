@@ -1,5 +1,6 @@
 """WhatsApp channel adapter — Evolution API implementation of ChannelAdapter."""
 
+import re
 import uuid
 from typing import Literal
 
@@ -78,6 +79,17 @@ class EvolutionAdapter:
             },
         )
 
+    @staticmethod
+    def _jid(to: str) -> str:
+        """Format a recipient as a WhatsApp JID: digits only + @s.whatsapp.net.
+
+        Numbers are stored with a leading ``+`` (e.g. ``351900000001``); Evolution
+        rejects ``+351...@s.whatsapp.net`` with HTTP 400 (``exists: false``). Strip
+        everything but digits so ``351900000001`` -> ``351900000001@s.whatsapp.net``.
+        """
+        digits = re.sub(r"[^0-9]", "", str(to or ""))
+        return f"{digits}@s.whatsapp.net"
+
     async def send_text(self, number_config: dict, to: str, text: str):
         from cante.channel import SentMessage
 
@@ -91,7 +103,7 @@ class EvolutionAdapter:
                 "Content-Type": "application/json",
             },
             json={
-                "number": f"{to}@s.whatsapp.net",
+                "number": self._jid(to),
                 "text": text,
                 "delay": 1200,
             },
@@ -113,7 +125,7 @@ class EvolutionAdapter:
         resp = await self._client.post(
             url,
             headers={"apikey": self._api_key, "Content-Type": "application/json"},
-            json={"number": f"{to}@s.whatsapp.net", "presence": state},
+            json={"number": self._jid(to), "presence": state},
             timeout=httpx.Timeout(10.0),
         )
         resp.raise_for_status()
@@ -133,7 +145,8 @@ class EvolutionAdapter:
             json={"instanceName": instance, "qrcode": True, "integration": "WHATSAPP-BAILEYS"},
             timeout=httpx.Timeout(30.0),
         )
-        if resp.status_code == 400 and "exist" in resp.text.lower():
+        if resp.status_code in (400, 403, 409):
+            # Instance already exists (should be rare with unique names)
             return {"instance": {"instanceName": instance, "status": "exists"}}
         resp.raise_for_status()
         return resp.json()
@@ -156,6 +169,26 @@ class EvolutionAdapter:
             status="qr_pending",
         )
 
+    # Canonicalise the raw Baileys/Evolution connection state.
+    # Evolution API v2 (Baileys) reports these states on /connectionState:
+    #   close / disconnecting   -> not paired
+    #   connecting             -> requesting QR / opening socket
+    #   connected              -> WebSocket open, NOT yet authenticated
+    #   open                   -> fully authenticated & paired (ready to send)
+    # NB: "open" IS the success state — Baileys never emits a state literally
+    # named "connected" for a paired instance. The cante app treats "connected"
+    # as "paired and usable", so we map "open" -> "connected" here. Mapping it in
+    # one place makes both the backend (number.status, welcome message) and the
+    # frontend (stop polling) detect pairing instead of hanging forever at "open".
+    _STATE_MAP = {
+        "open": "connected",
+        "connected": "connected",
+        "connecting": "connecting",
+        "close": "close",
+        "disconnected": "close",
+        "disconnecting": "close",
+    }
+
     async def status(self, number_config: dict):
         from cante.channel import ConnectionStatus
 
@@ -169,8 +202,12 @@ class EvolutionAdapter:
         )
         resp.raise_for_status()
         data = resp.json()
+        # Evolution v2 nests state under "instance": {"instance": {..., "state": "..."}}
+        inner = data.get("instance", data)
+        raw_state = inner.get("state", "disconnected")
+        state = self._STATE_MAP.get(raw_state, raw_state)
         return ConnectionStatus(
-            status=data.get("state", "disconnected"),
+            status=state,
             phone=number_config.get("phone", ""),
             instance_id=instance,
         )
@@ -186,9 +223,12 @@ def instance_name_for(phone: str) -> str:
     """Build a valid Evolution instance name from a phone number.
 
     Evolution instance names are lowercase alphanumerics; a raw phone like
-    ``+351900000000`` is invalid (``+``). Slug to ``cante351900000000``.
+    ``+351900000000`` is invalid (``+``). Each creation gets a unique suffix
+    so re-creating a Number always yields a fresh WhatsApp pairing QR.
     """
-    import re
+    import re, uuid
 
     digits = re.sub(r"[^0-9]", "", phone or "")
-    return f"cante{digits}" if digits else f"cante{uuid.uuid4().hex[:8]}"
+    base = f"cante{digits}" if digits else f"cante{uuid.uuid4().hex[:8]}"
+    # Short random suffix so re-creating a Number never reuses a stale instance
+    return f"{base}{uuid.uuid4().hex[:6]}"
