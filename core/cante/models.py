@@ -218,6 +218,11 @@ class Conversation(Base, TenantScoped):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     last_activity_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
+    # Relationships (eager-loaded by the API to show phone/name in the UI).
+    number = relationship("Number")
+    bot = relationship("Bot")
+    contact = relationship("Contact")
+
     __table_args__ = (
         Index("idx_conv_state", "state"),
         Index("idx_conv_bot", "bot_id"),
