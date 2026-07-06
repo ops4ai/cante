@@ -95,7 +95,8 @@ def _verify_signature(raw_body: bytes, secret: str, request: Request) -> bool:
 
 
 @app.post("/channels/{channel_id}/webhook")
-async def webhook(channel_id: str, request: Request):
+@app.post("/channels/{channel_id}/webhook/{event}")
+async def webhook(channel_id: str, request: Request, event: str = ""):
     redis = await get_redis()
 
     # S2: per-IP rate limit.

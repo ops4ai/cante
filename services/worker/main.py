@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 import signal
 import structlog
 
@@ -16,6 +17,97 @@ logger = structlog.get_logger(__name__)
 running = True
 S_IN, S_OUT, S_TRIG = "stream:inbound", "stream:outbound", "stream:triggers"
 GROUP, CONSUMER = "agent-workers", "worker-1"
+
+# ── Language detection ─────────────────────────────────────────────────
+
+# Common words that strongly indicate a language (case-insensitive match)
+_LANG_MARKERS = {
+    "pt": [
+        "olá", "ola", "bom dia", "boa tarde", "boa noite", "obrigad", "por favor",
+        "tudo bem", "como estás", "como vai", "preciso", "ajuda", "quero",
+        "não", "sim", "para", "com", "uma", "que", "estou", "muito", "mas",
+    ],
+    "en": [
+        "hello", "hi", "good morning", "good afternoon", "good evening", "thank",
+        "please", "how are you", "need", "help", "want",
+        "not", "yes", "for", "with", "the", "that", "this", "very", "but",
+    ],
+    "es": [
+        "hola", "buenos días", "buenas tardes", "buenas noches", "gracias",
+        "por favor", "cómo estás", "necesito", "ayuda", "quiero",
+        "no", "sí", "para", "con", "una", "que", "estoy", "muy", "pero",
+    ],
+}
+
+
+def detect_language(text: str) -> str | None:
+    """Return the most likely language code for *text*, or None if unclear.
+
+    Returns 'pt-PT' or 'pt-BR' when Brazilian vs European markers are present
+    (so the right variant is pinned), falling back to 'pt-PT' for generic PT.
+    """
+    if not text or not text.strip():
+        return None
+    lower = text.lower().strip()
+    # Brazilian markers (você/pra/a gente/terminações em -i) vs European.
+    if any(m in lower for m in ("você", "pra", "a gente", "né", "tá", "tô", "vimos")):
+        return "pt-BR"
+    if any(m in lower for m in ("bue", "fixe", "pá", "estás", "tens", "posso", "vou")):
+        return "pt-PT"
+    scores = {}
+    for lang, markers in _LANG_MARKERS.items():
+        scores[lang] = sum(1 for m in markers if m in lower)
+    best = max(scores, key=lambda k: scores[k])
+    if scores[best] < 2:
+        return None
+    # Generic PT detection — default to European Portuguese.
+    return "pt-PT" if best == "pt" else best
+
+
+_LANG_INSTRUCTION = {
+    "pt-PT": "Responde sempre em português de Portugal (PT-PT, europeu, informal e amigável). Usa vocabulário e expressões de Portugal (ex: 'telemóvel', 'está bem', 'ok'), nunca do Brasil.",
+    "pt-BR": "Responde sempre em português do Brasil (PT-BR, informal e amigável).",
+    "pt": "Responde sempre em português de Portugal (PT-PT, europeu, informal e amigável).",
+    "en": "Always reply in English (clear and friendly).",
+    "es": "Responde siempre en español (informal y amigable).",
+}
+
+# Map a contact's phone country code to a language variant. +351 = Portugal.
+_PHONE_COUNTRY_LANG = {
+    "351": "pt-PT",
+    "354": "en",   # Iceland
+    "353": "en",   # Ireland
+    "44": "en",    # UK
+    "34": "es",    # Spain
+    "55": "pt-BR", # Brazil
+    "33": "fr",    # France (added below if needed)
+}
+_LANG_INSTRUCTION.setdefault("fr", "Réponds toujours en français (informel et amical).")
+
+
+def _lang_from_phone(phone: str) -> str | None:
+    """Infer a language variant from the contact's phone country code.
+
+    A +351 number is overwhelmingly a Portuguese (PT) contact, so we default to
+    pt-PT even before any text-based detection. This also resolves the 'which
+    Portuguese' ambiguity (PT-PT vs PT-BR) that word markers can't.
+    """
+    digits = re.sub(r"[^0-9]", "", phone or "")
+    # Try longest country-code prefix (2-4 digits).
+    for n in (3, 2, 4):
+        if len(digits) >= n:
+            cc = digits[:n]
+            if cc in _PHONE_COUNTRY_LANG:
+                return _PHONE_COUNTRY_LANG[cc]
+    return None
+
+
+def build_system_prompt(playbook: str, lang: str | None) -> str:
+    """Build the system prompt, prepending a language instruction when *lang* is set."""
+    instruction = _LANG_INSTRUCTION.get(lang or "", "")
+    if instruction:
+        return f"{instruction}\n\n{playbook}"
+    return playbook
 
 
 def _sigterm(*_):
@@ -149,17 +241,20 @@ async def run_agent_loop(
     return "Vou pedir a um humano para continuar esta conversa.", {"_escalated": True}
 
 
-async def _resolve_route(from_phone: str, number_phone: str):
+async def _resolve_route(from_phone: str, number_phone: str, channel_id: str = ""):
     """Resolve the routing for an inbound message.
 
     Returns (tenant_id, bot, skill, provider, contact_id, conversation_id) or None
     if no route matches. Reads happen in a short-lived session (closed before the
     LLM call — GOTCHAS §1) and the contact is upserted with ON CONFLICT (§2).
+
+    The Number is resolved by ``channel_id`` (its UUID, set by the ingress from
+    the webhook path) first, falling back to ``number_phone`` for older channels.
     """
     from cante.db import async_session_factory
     from cante.models import Bot, Contact, Conversation, Number, Provider, Route, Skill
     from cante.tenant import with_bypass, with_tenant
-    from sqlalchemy import select
+    from sqlalchemy import select, or_
     from sqlalchemy.dialects.postgresql import insert as pg_insert
     from datetime import datetime, timezone
 
@@ -170,9 +265,12 @@ async def _resolve_route(from_phone: str, number_phone: str):
         # isn't known until we walk number→route→bot. Read under a bypass, then
         # switch to the resolved tenant for the contact/conversation writes.
         with with_bypass():
-            number = (
-                await session.execute(select(Number).where(Number.phone == number_phone))
-            ).scalars().first()
+            num_stmt = select(Number)
+            if channel_id:
+                num_stmt = num_stmt.where(or_(Number.id == str(channel_id), Number.phone == number_phone))
+            else:
+                num_stmt = num_stmt.where(Number.phone == number_phone)
+            number = (await session.execute(num_stmt)).scalars().first()
             if not number:
                 return None
             route = (
@@ -217,6 +315,66 @@ async def _resolve_route(from_phone: str, number_phone: str):
         return tenant_id, bot, skill, provider, api_key, contact_id, conv.id
 
 
+async def _resolve_language(conv_id: str, contact_id: str, tenant_id: str, body: str, from_phone: str = "") -> str | None:
+    """Determine the language for this conversation.
+
+    Priority:
+    1. The contact's saved ``preferred_language`` (sticky across conversations).
+    2. The contact's phone country code (a +351 number → pt-PT). This is the
+       strongest signal for the PT-PT vs PT-BR ambiguity that text markers can't
+       reliably resolve.
+    3. Text-based detection from *body* (refines the variant when markers exist).
+    4. None if inconclusive (the bot's default language applies).
+    """
+    from cante.db import async_session_factory
+    from cante.models import Contact, Conversation
+    from cante.tenant import with_tenant
+    from sqlalchemy import select, update
+
+    async with async_session_factory() as session:
+        with with_tenant(tenant_id):
+            # Check contact's preferred language first
+            contact = (await session.execute(
+                select(Contact).where(Contact.id == contact_id)
+            )).scalar_one_or_none()
+            if contact:
+                attrs = contact.attributes or {}
+                stored = attrs.get("preferred_language")
+                if stored:
+                    # Already known — just update the conversation
+                    await session.execute(
+                        update(Conversation).where(Conversation.id == conv_id).values(language_detected=stored)
+                    )
+                    await session.commit()
+                    return stored
+
+            # Phone country code (e.g. +351 -> pt-PT) — strongest variant signal.
+            phone_lang = _lang_from_phone(from_phone)
+            # Text detection refines the variant (pt-BR markers override +55 etc.).
+            detected = detect_language(body) or phone_lang
+            # If text didn't contradict the phone variant, prefer the phone one
+            # so a +351 number always gets PT-PT even with a generic "ola".
+            if phone_lang and (not detected or detected.split("-")[0] == phone_lang.split("-")[0]):
+                detected = phone_lang
+            if detected:
+                # Save to conversation
+                await session.execute(
+                    update(Conversation).where(Conversation.id == conv_id).values(language_detected=detected)
+                )
+                # Save to contact for future conversations
+                if contact:
+                    attrs = dict(contact.attributes or {})
+                    attrs["preferred_language"] = detected
+                    await session.execute(
+                        update(Contact).where(Contact.id == contact_id).values(attributes=attrs)
+                    )
+                await session.commit()
+                return detected
+
+            await session.commit()
+            return None
+
+
 async def _persist_message(conversation_id: str, tenant_id: str, direction: str, role: str, body: str, tokens: int = 0) -> None:
     """Persist one Message row in a short-lived session (GOTCHAS §1)."""
     from cante.db import async_session_factory
@@ -241,6 +399,7 @@ async def process(entry, bus, redis):
     data = entry.data
     from_phone = data.get("from_phone", "")
     number_phone = data.get("number_phone", "")
+    channel_id = data.get("channel_id", "")
     body = data.get("body", "")
     cid = data.get("conversation_id", from_phone or "unknown")
     lock = f"lock:conv:{cid}"
@@ -267,9 +426,9 @@ async def process(entry, bus, redis):
             reply, ctx_updates = await run_agent_loop(body, None, None)
             skill_scope = {}
         else:
-            route = await _resolve_route(from_phone, number_phone)
+            route = await _resolve_route(from_phone, number_phone, channel_id)
             if route is None:
-                logger.warning("worker.no_route", from_phone=from_phone, number_phone=number_phone)
+                logger.warning("worker.no_route", from_phone=from_phone, number_phone=number_phone, channel_id=channel_id)
                 reply = "Sorry, no agent is configured for this number right now."
                 ctx_updates = {}
                 skill_scope = {}
@@ -278,11 +437,16 @@ async def process(entry, bus, redis):
                 skill_scope = skill.scope
                 # Persist the inbound message before the LLM call.
                 await _persist_message(conv_id, tenant_id, "in", "user", body)
+
+                # ── Language detection & contact preference ────────────
+                pref_lang = await _resolve_language(conv_id, _contact_id, tenant_id, body, from_phone)
+
                 # Build tools + adapter OUTSIDE any DB session (GOTCHAS §1).
                 tools = _build_tools(skill.tools)
                 llm = build_provider_adapter(provider, api_key)
                 reply, ctx_updates = await run_agent_loop(
-                    body, llm, tools, system_prompt=skill.playbook_md or None
+                    body, llm, tools,
+                    system_prompt=build_system_prompt(skill.playbook_md or "", pref_lang),
                 )
 
         # ── C12: Guard pipeline ──────────────────────────────────────────
@@ -316,6 +480,7 @@ async def process(entry, bus, redis):
             "conversation_id": cid,
             "from_phone": from_phone,
             "number_phone": number_phone,
+            "channel_id": channel_id,
             "body": reply,
             "_ctx": json.dumps(ctx_updates),
         })
