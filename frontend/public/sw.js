@@ -1,7 +1,7 @@
 // Minimal service worker: cache the app shell so the backoffice is usable
 // offline / installable on phones. Network-first for /v1 (API), cache-first
 // for static assets. Bump CACHE_VERSION on deploy to refresh the shell.
-const CACHE_VERSION = 'cante-v1';
+const CACHE_VERSION = 'cante-v3';
 const SHELL = ['/', '/index.html', '/manifest.webmanifest', '/favicon.svg'];
 
 self.addEventListener('install', (event) => {

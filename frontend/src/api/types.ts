@@ -21,6 +21,7 @@ export interface Number {
   phone: string
   display_name: string
   channel_type: string
+  status?: string
   connection_config?: Record<string, unknown>
   tenant_id: string
 }
@@ -93,6 +94,9 @@ export interface Conversation {
   number_id: string
   last_activity_at: string
   started_at: string
+  bot_name?: string
+  number_phone?: string
+  contact_phone?: string
 }
 
 export interface Message {

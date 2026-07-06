@@ -5,7 +5,7 @@ import { Table, Column } from '../components/Table'
 import { Button, Field, inputCls, Modal } from '../components/Modal'
 import { QRModal } from '../components/QRModal'
 import { Spinner, ErrorState, EmptyState } from '../components/Spinner'
-import { listNumbers, createNumber, connectNumber, disconnectNumber } from '../api/numbers'
+import { listNumbers, createNumber, disconnectNumber, deleteNumber } from '../api/numbers'
 import type { Number, Paginated } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
 
@@ -35,7 +35,7 @@ export function NumbersPage() {
     onSuccess: () => { qc.invalidateQueries('numbers'); setShowCreate(false) },
   })
 
-  const connectMut = useMutation((id: string) => connectNumber(id), {
+  const deleteMut = useMutation((id: string) => deleteNumber(id), {
     onSuccess: () => qc.invalidateQueries('numbers'),
   })
   const disconnectMut = useMutation((id: string) => disconnectNumber(id), {
@@ -47,16 +47,31 @@ export function NumbersPage() {
     { key: 'name', header: 'Display name', render: (n) => n.display_name || '—' },
     { key: 'channel', header: 'Channel', render: (n) => <code className="text-xs">{n.channel_type}</code> },
     {
+      key: 'status',
+      header: 'Status',
+      render: (n) => {
+        const connected = n.status === 'connected'
+        return (
+          <span className={`inline-flex items-center gap-1.5 text-xs font-medium ${connected ? 'text-green-700' : 'text-gray-500'}`}>
+            <span className={`inline-block h-2 w-2 rounded-full ${connected ? 'bg-green-500' : 'bg-gray-400'}`} />
+            {connected ? 'Connected' : n.status || '—'}
+          </span>
+        )
+      },
+    },
+    {
       key: 'actions',
       header: 'Actions',
       render: (n) => (
         <div className="flex gap-2">
-          <Button variant="ghost" onClick={() => setQrFor(n.id)}>QR</Button>
-          {isAdmin && (
-            <Button variant="ghost" disabled={connectMut.isLoading} onClick={() => connectMut.mutate(n.id)}>Connect</Button>
-          )}
+          <Button variant={n.status === 'connected' ? 'ghost' : 'primary'} onClick={() => setQrFor(n.id)}>
+            {n.status === 'connected' ? 'QR' : 'Connect'}
+          </Button>
           {isAdmin && (
             <Button variant="ghost" disabled={disconnectMut.isLoading} onClick={() => disconnectMut.mutate(n.id)}>Disconnect</Button>
+          )}
+          {isAdmin && (
+            <Button variant="danger" disabled={deleteMut.isLoading} onClick={() => { if (confirm('Delete this number and its routes?')) deleteMut.mutate(n.id) }}>Delete</Button>
           )}
         </div>
       ),

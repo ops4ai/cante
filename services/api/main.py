@@ -398,9 +398,15 @@ async def list_numbers(cursor: str = "", limit: int = DEFAULT_PAGE_SIZE, princip
 async def create_number(data: NumberCreateIn, principal: Principal = Depends(RequireRole("admin"))):
     from cante.evolution import EvolutionAdapter, instance_name_for
     from cante.models import Number
+    import secrets
     async with async_session_factory() as session:
         instance = instance_name_for(data.phone)
-        connection_config = {"instance": instance, "phone": data.phone}
+        webhook_secret = secrets.token_urlsafe(32)
+        connection_config = {
+            "instance": instance,
+            "phone": data.phone,
+            "webhook_secret": webhook_secret,
+        }
         n = Number(
             phone=data.phone,
             display_name=data.display_name,
@@ -415,6 +421,9 @@ async def create_number(data: NumberCreateIn, principal: Principal = Depends(Req
         try:
             adapter = EvolutionAdapter()
             await adapter.create_instance(instance)
+            # Configure the webhook so Evolution forwards incoming messages to the ingress.
+            webhook_url = f"{settings.ingress_base_url.rstrip('/')}/channels/{n.id}/webhook"
+            await adapter.set_webhook(instance, webhook_url, webhook_secret)
         except Exception as exc:
             await session.rollback()
             raise HTTPException(503, f"Evolution instance create failed: {exc}") from exc
@@ -461,6 +470,21 @@ async def get_qr(num_id: str, principal: Principal = Depends(RequireRole("admin"
                 # /connect would otherwise skip the welcome because number.status
                 # is already "connected" by the time it runs.
                 number.status = "connected"
+                # Ensure webhook is configured (may be missing for numbers created before the fix)
+                cfg = number.connection_config or {}
+                if not cfg.get("webhook_secret"):
+                    import secrets
+                    cfg["webhook_secret"] = secrets.token_urlsafe(32)
+                    number.connection_config = cfg
+                try:
+                    webhook_url = f"http://cante-cds-ingress:8001/channels/{number.id}/webhook"
+                    await adapter.set_webhook(
+                        cfg["instance"],
+                        webhook_url,
+                        cfg["webhook_secret"],
+                    )
+                except Exception:
+                    pass  # best-effort for existing numbers
                 await session.commit()
                 try:
                     await adapter.send_text(
@@ -534,26 +558,26 @@ async def delete_number(num_id: str, principal: Principal = Depends(RequireRole(
 
 @app.post("/v1/numbers/{num_id}/disconnect")
 async def disconnect_number(num_id: str, principal: Principal = Depends(RequireRole("admin"))):
-    """Disconnect *num_id* from the WhatsApp gateway.
+    """Disconnect *num_id* from the WhatsApp gateway (logout, not delete).
 
-    The Evolution API does not expose a direct "disconnect" endpoint, so this
-    returns the current connection state as reported by the gateway.
+    v2.3: ``DELETE /instance/logout/{instance}`` logs out the WhatsApp session
+    so the phone can re-pair via a fresh QR. Idempotent on an already-disconnected
+    instance.
     """
     from cante.evolution import EvolutionAdapter
     from cante.models import Number
 
     async with async_session_factory() as session:
         number = await load_owned(session, Number, num_id, principal)
+        instance = (number.connection_config or {}).get("instance", number.phone)
         adapter = EvolutionAdapter()
         try:
-            state = await adapter.status(number.connection_config)
-            return {
-                "status": state.status,
-                "phone": state.phone,
-                "instance_id": state.instance_id,
-            }
+            await adapter.logout(instance)
+            number.status = "disconnected"
+            await session.commit()
+            return {"status": "disconnected", "instance": instance}
         except Exception as exc:
-            raise HTTPException(503, f"Evolution API unreachable: {exc}") from exc
+            raise HTTPException(503, f"Evolution logout failed: {exc}") from exc
 
 
 # ── Bots ────────────────────────────────────────────────────────────
@@ -906,6 +930,7 @@ async def list_conversations(
 ):
     from cante.models import Conversation
     from sqlalchemy import func, select
+    from sqlalchemy.orm import selectinload
 
     async with async_session_factory() as session:
         limit = min(max(1, limit), MAX_PAGE_SIZE)
@@ -921,8 +946,18 @@ async def list_conversations(
             cnt_stmt = cnt_stmt.where(Conversation.number_id == number_id)
         total = (await session.execute(cnt_stmt)).scalar() or 0
 
-        # Keyset
-        stmt = select(Conversation).order_by(col.desc()).limit(limit + 1)
+        # Keyset — eager-load related Number, Bot, Contact so we can show
+        # human-readable phone / name instead of raw UUIDs in the UI.
+        stmt = (
+            select(Conversation)
+            .options(
+                selectinload(Conversation.number),
+                selectinload(Conversation.bot),
+                selectinload(Conversation.contact),
+            )
+            .order_by(col.desc())
+            .limit(limit + 1)
+        )
         if state:
             stmt = stmt.where(Conversation.state == state)
         if bot_id:
@@ -938,7 +973,22 @@ async def list_conversations(
             rows = rows[:limit]
 
         return {
-            "items": [{"id": c.id, "state": c.state, "language_detected": c.language_detected, "contact_id": c.contact_id, "bot_id": c.bot_id, "number_id": c.number_id, "last_activity_at": str(c.last_activity_at), "started_at": str(c.started_at)} for c in rows],
+            "items": [
+                {
+                    "id": c.id,
+                    "state": c.state,
+                    "language_detected": c.language_detected,
+                    "contact_id": c.contact_id,
+                    "bot_id": c.bot_id,
+                    "number_id": c.number_id,
+                    "last_activity_at": str(c.last_activity_at),
+                    "started_at": str(c.started_at),
+                    "bot_name": c.bot.name if c.bot else "",
+                    "number_phone": c.number.phone if c.number else "",
+                    "contact_phone": c.contact.phone if c.contact else "",
+                }
+                for c in rows
+            ],
             "total": total,
             "next_cursor": str(rows[-1].last_activity_at) if has_more and rows else None,
         }

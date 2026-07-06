@@ -27,3 +27,7 @@ export async function connectNumber(id: string): Promise<unknown> {
 export async function disconnectNumber(id: string): Promise<unknown> {
   return apiFetch(`/v1/numbers/${id}/disconnect`, { method: 'POST' })
 }
+
+export async function deleteNumber(id: string): Promise<unknown> {
+  return apiFetch(`/v1/numbers/${id}`, { method: 'DELETE' })
+}

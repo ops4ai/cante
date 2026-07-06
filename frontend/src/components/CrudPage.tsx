@@ -4,16 +4,19 @@ import { PageHeader } from './PageHeader'
 import { Table, Column } from './Table'
 import { Modal, Button, Field, inputCls } from './Modal'
 import { Spinner, ErrorState, EmptyState } from './Spinner'
+import { apiFetch } from '../api/client'
 
-export type FieldType = 'text' | 'number' | 'textarea' | 'select' | 'json'
+export type FieldType = 'text' | 'number' | 'textarea' | 'select' | 'json' | 'asyncSelect'
 export interface FieldDef {
   name: string
   label: string
   type?: FieldType
   options?: { value: string; label: string }[]
+  loadOptions?: () => Promise<{ value: string; label: string }[]>
   required?: boolean
   default?: string | number
   placeholder?: string
+  showIf?: (values: Record<string, unknown>) => boolean
 }
 
 interface CrudConfig<T> {
@@ -116,7 +119,15 @@ function FormModal({ title, fields, initial, onSubmit, onClose, submitting, erro
 }) {
   const [values, setValues] = useState<Record<string, unknown>>(() => {
     const v: Record<string, unknown> = {}
-    for (const f of fields) v[f.name] = initial?.[f.name] ?? defaultValue(f)
+    for (const f of fields) {
+      const raw = initial?.[f.name] ?? defaultValue(f)
+      // JSON fields: store as pretty-printed string for editing
+      if (f.type === 'json' && raw !== null && typeof raw === 'object') {
+        v[f.name] = JSON.stringify(raw, null, 2)
+      } else {
+        v[f.name] = raw
+      }
+    }
     return v
   })
   const set = (n: string, val: unknown) => setValues((p) => ({ ...p, [n]: val }))
@@ -141,16 +152,18 @@ function FormModal({ title, fields, initial, onSubmit, onClose, submitting, erro
   return (
     <Modal open onClose={onClose} title={title}>
       <div className="space-y-3">
-        {fields.map((f) => (
+        {fields.filter((f) => !f.showIf || f.showIf(values)).map((f) => (
           <Field key={f.name} label={f.label}>
             {f.type === 'textarea' ? (
-              <textarea className={`${inputCls} font-mono text-xs`} rows={16} value={String(values[f.name] ?? '')} placeholder={f.placeholder} onChange={(e) => set(f.name, e.target.value)} />
+              <textarea className={`${inputCls} font-mono text-xs`} rows={20} style={{resize: 'vertical', minHeight: '16rem'}} value={String(values[f.name] ?? '')} placeholder={f.placeholder} onChange={(e) => set(f.name, e.target.value)} />
+            ) : f.type === 'asyncSelect' && f.loadOptions ? (
+              <AsyncSelect value={String(values[f.name] ?? '')} onChange={(v) => set(f.name, v)} loadOptions={f.loadOptions} queryKey={f.name} placeholder={f.placeholder} />
             ) : f.type === 'select' ? (
               <select className={inputCls} value={String(values[f.name] ?? '')} onChange={(e) => set(f.name, e.target.value)}>
                 {f.options?.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
               </select>
             ) : f.type === 'json' ? (
-              <textarea className={`${inputCls} font-mono text-xs`} rows={8} value={String(values[f.name] ?? '')} placeholder='{"key":"value"}' onChange={(e) => set(f.name, e.target.value)} />
+              <textarea className={`${inputCls} font-mono text-xs`} rows={8} value={typeof values[f.name] === 'object' && values[f.name] !== null ? JSON.stringify(values[f.name], null, 2) : String(values[f.name] ?? '')} placeholder='{"key":"value"}' onChange={(e) => set(f.name, e.target.value)} />
             ) : (
               <input className={inputCls} type={f.type === 'number' ? 'number' : 'text'} value={String(values[f.name] ?? '')} placeholder={f.placeholder} onChange={(e) => set(f.name, f.type === 'number' ? Number(e.target.value) : e.target.value)} />
             )}
@@ -168,4 +181,30 @@ function FormModal({ title, fields, initial, onSubmit, onClose, submitting, erro
 
 export function asCode(v: ReactNode): ReactNode {
   return <code className="text-xs">{v}</code>
+}
+
+// AsyncSelect — fetches options from an API endpoint and renders a <select>.
+// Caches per queryKey so options are shared across multiple form instances.
+export function AsyncSelect({
+  value, onChange, loadOptions, queryKey, placeholder,
+}: {
+  value: string; onChange: (v: string) => void; loadOptions: () => Promise<{ value: string; label: string }[]>
+  queryKey: string; placeholder?: string
+}) {
+  const { data: options, isLoading, isError } = useQuery(
+    ['select', queryKey],
+    loadOptions,
+    { staleTime: 60_000, refetchOnWindowFocus: false },
+  )
+  return (
+    <div className="relative">
+      <select className={inputCls} value={value} onChange={(e) => onChange(e.target.value)} disabled={isLoading || isError}>
+        <option value="">{isLoading ? 'Loading…' : isError ? 'Failed to load' : placeholder || 'Select…'}</option>
+        {(options ?? []).map((o) => (
+          <option key={o.value} value={o.value}>{o.label}</option>
+        ))}
+      </select>
+      {isLoading && <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-400">⏳</span>}
+    </div>
+  )
 }

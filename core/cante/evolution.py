@@ -83,9 +83,9 @@ class EvolutionAdapter:
     def _jid(to: str) -> str:
         """Format a recipient as a WhatsApp JID: digits only + @s.whatsapp.net.
 
-        Numbers are stored with a leading ``+`` (e.g. ``351900000001``); Evolution
+        Numbers are stored with a leading ``+`` (e.g. ``+351900000000``); Evolution
         rejects ``+351...@s.whatsapp.net`` with HTTP 400 (``exists: false``). Strip
-        everything but digits so ``351900000001`` -> ``351900000001@s.whatsapp.net``.
+        everything but digits so ``+351900000000`` -> ``351900000000@s.whatsapp.net``.
         """
         digits = re.sub(r"[^0-9]", "", str(to or ""))
         return f"{digits}@s.whatsapp.net"
@@ -129,6 +129,45 @@ class EvolutionAdapter:
             timeout=httpx.Timeout(10.0),
         )
         resp.raise_for_status()
+
+    async def set_webhook(self, instance: str, webhook_url: str, webhook_token: str) -> dict:
+        """Configure the Evolution instance to forward incoming messages to *webhook_url*.
+
+        ``POST /webhook/set/{instance}`` — v2.3 requires the config nested under
+        a ``webhook`` key (a flat body returns 400). The token is sent back to
+        the ingress as ``X-Webhook-Token`` for authentication.
+        """
+        url = f"{self._base_url}/webhook/set/{instance}"
+        resp = await self._client.post(
+            url,
+            headers={"apikey": self._api_key, "Content-Type": "application/json"},
+            json={
+                "webhook": {
+                    "enabled": True,
+                    "url": webhook_url,
+                    "byEvents": True,
+                    "events": ["MESSAGES_UPSERT"],
+                    "headers": {"x-webhook-token": webhook_token},
+                }
+            },
+            timeout=httpx.Timeout(10.0),
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def logout(self, instance: str) -> dict:
+        """Disconnect the WhatsApp session for *instance* (log out, not delete).
+
+        ``DELETE /instance/logout/{instance}`` — v2.3 uses DELETE, not POST.
+        A not-connected instance returns 400 ("instance is not connected"); treat
+        that as success so disconnecting an already-disconnected Number is safe.
+        """
+        url = f"{self._base_url}/instance/logout/{instance}"
+        resp = await self._client.delete(url, headers={"apikey": self._api_key}, timeout=httpx.Timeout(10.0))
+        if resp.status_code == 400 and "not connected" in resp.text.lower():
+            return {"success": True, "message": "already disconnected"}
+        resp.raise_for_status()
+        return resp.json()
 
     async def create_instance(self, instance: str) -> dict:
         """Create a WhatsApp-Baileys instance in Evolution (v2.3+).
@@ -226,8 +265,6 @@ def instance_name_for(phone: str) -> str:
     ``+351900000000`` is invalid (``+``). Each creation gets a unique suffix
     so re-creating a Number always yields a fresh WhatsApp pairing QR.
     """
-    import re, uuid
-
     digits = re.sub(r"[^0-9]", "", phone or "")
     base = f"cante{digits}" if digits else f"cante{uuid.uuid4().hex[:8]}"
     # Short random suffix so re-creating a Number never reuses a stale instance

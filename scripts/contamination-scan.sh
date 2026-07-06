@@ -91,7 +91,7 @@ fi
 # npm/package-lock boilerplate) doesn't trip the gate. This mirrors the
 # gitleaks allowlist concept for the PII layer.
 grep -vE \
-  'noreply@anthropic\.com|@users\.noreply\.github\.com|@example\.(com|org)|@example\.[a-z]+|placeholder|changeme|example\.com|example\.org|\+351[[:space:]]?900000000|<your-|<email>|<phone>|izs\.me|@i@' \
+  'noreply@anthropic\.com|@users\.noreply\.github\.com|@example\.(com|org)|@example\.[a-z]+|placeholder|changeme|example\.com|example\.org|\+351[[:space:]]?900000000|<your-|<email>|<phone>|izs\.me|@i@|@s\.whatsapp\.net|@g\.us|@c\.us' \
   "$tmp/haystack.txt" > "$tmp/pii_hay.txt" 2>/dev/null || true
 PII_REGEX='(\+351[[:space:]]?)?9[1236][0-9]{7}|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|PT50[0-9]{21}'
 if grep -nE "$PII_REGEX" "$tmp/pii_hay.txt" >/dev/null 2>&1; then

@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     evolution_base_url: str = "http://evolution:8080"
     evolution_api_key: str = ""
 
+    # Base URL the Evolution API uses to call the cante ingress for incoming
+    # messages (set per instance in .env, e.g. http://cante-cds-ingress:8001).
+    ingress_base_url: str = "http://cante-ingress:8001"
+
     # ── Frontend / domain ────────────────────────
     public_domain: str = "localhost"
     admin_email: str = "admin@example.com"
