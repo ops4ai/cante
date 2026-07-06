@@ -154,8 +154,19 @@ async def test_cross_tenant_conversation_404(app, admin_token):
 
 
 @pytest.mark.asyncio
-async def test_audit_logged_on_number_create(app, admin_token):
+async def test_audit_logged_on_number_create(app, admin_token, monkeypatch):
     import httpx
+
+    # create_number provisions an Evolution instance; in CI there's no Evolution
+    # running, so mock the adapter to a no-op (we're testing audit logging, not
+    # the WhatsApp gateway).
+    from cante.evolution import EvolutionAdapter
+
+    async def _noop(*a, **kw):
+        return {}
+
+    monkeypatch.setattr(EvolutionAdapter, "create_instance", _noop)
+    monkeypatch.setattr(EvolutionAdapter, "set_webhook", _noop)
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         r = await client.post(
