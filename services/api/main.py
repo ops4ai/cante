@@ -116,7 +116,7 @@ async def paginate(session, model, *, cursor: str = "", limit: int = DEFAULT_PAG
     from sqlalchemy import func, select
 
     limit = min(max(1, limit), MAX_PAGE_SIZE)
-    col = order_col if order_col is not None else model.created_at
+    col = order_col if order_col is not None else getattr(model, 'created_at', model.id)
 
     # Total count
     cnt_stmt = select(func.count(model.id))
@@ -410,14 +410,14 @@ async def create_number(data: NumberCreateIn, principal: Principal = Depends(Req
         session.add(n)
         await session.flush()
         # Provision the Evolution instance now so /qr (instance/connect) works.
-        # Provisioning failures are surfaced as a 502 (don't silently save a
+        # Provisioning failures are surfaced as a 503 (don't silently save a
         # Number whose QR can never be fetched).
         try:
             adapter = EvolutionAdapter()
             await adapter.create_instance(instance)
         except Exception as exc:
             await session.rollback()
-            raise HTTPException(502, f"Evolution instance create failed: {exc}") from exc
+            raise HTTPException(503, f"Evolution instance create failed: {exc}") from exc
         await log_audit(session, principal, "number.create", f"number:{n.id}", after={"phone": n.phone, "channel_type": n.channel_type, "instance": instance})
         await session.commit()
         return {"id": n.id, "phone": n.phone, "status": n.status, "instance": instance}
@@ -429,6 +429,8 @@ async def get_qr(num_id: str, principal: Principal = Depends(RequireRole("admin"
 
     Calls the Evolution API ``/instance/connect/{instance}`` endpoint which
     returns a base64-encoded QR code when the instance is waiting for a scan.
+    After scanning, checks the actual connection state so the frontend can
+    detect when pairing is complete.
     """
     from cante.evolution import EvolutionAdapter
     from cante.models import Number
@@ -437,13 +439,41 @@ async def get_qr(num_id: str, principal: Principal = Depends(RequireRole("admin"
         number = await load_owned(session, Number, num_id, principal)
         adapter = EvolutionAdapter()
         try:
-            result = await adapter.connect(number.connection_config)
-            return {
-                "qr_code": result.qr_code,
-                "status": result.status,
-            }
+            # Always try to get QR first — works for fresh instances
+            qr_code = ""
+            try:
+                result = await adapter.connect(number.connection_config)
+                qr_code = result.qr_code or ""
+            except Exception:
+                pass
+
+            # Then check real state from Evolution
+            try:
+                real = await adapter.status(number.connection_config)
+                state = real.status
+            except Exception:
+                state = "qr_pending" if qr_code else "unknown"
+
+            if state == "connected" and number.status != "connected":
+                # Transition just detected by the QR poll — mark connected and
+                # fire the welcome message. Doing it here (not only in /connect)
+                # means the normal QR-scan flow confirms pairing end-to-end;
+                # /connect would otherwise skip the welcome because number.status
+                # is already "connected" by the time it runs.
+                number.status = "connected"
+                await session.commit()
+                try:
+                    await adapter.send_text(
+                        number.connection_config,
+                        to=number.phone,
+                        text="Hello! Your number is now connected. 🎉",
+                    )
+                except Exception:
+                    pass  # best-effort
+
+            return {"qr_code": qr_code, "status": state}
         except Exception as exc:
-            raise HTTPException(502, f"Evolution API unreachable: {exc}") from exc
+            raise HTTPException(503, f"Evolution API unreachable: {exc}") from exc
 
 
 @app.post("/v1/numbers/{num_id}/connect")
@@ -459,13 +489,47 @@ async def connect_number(num_id: str, principal: Principal = Depends(RequireRole
         number = await load_owned(session, Number, num_id, principal)
         adapter = EvolutionAdapter()
         try:
-            result = await adapter.connect(number.connection_config)
-            return {
-                "qr_code": result.qr_code,
-                "status": result.status,
-            }
+            # Get real state first, try QR only for fresh instances
+            real = await adapter.status(number.connection_config)
+            state = real.status
+            qr_code = ""
+            if state in ("close", "connecting"):
+                try:
+                    result = await adapter.connect(number.connection_config)
+                    qr_code = result.qr_code or ""
+                except Exception:
+                    pass
+            if state == "connected" and number.status != "connected":
+                number.status = "connected"
+                await session.commit()
+                # Send welcome message to confirm it works
+                try:
+                    await adapter.send_text(
+                        number.connection_config,
+                        to=number.phone,
+                        text="Hello! Your number is now connected. 🎉",
+                    )
+                except Exception:
+                    pass  # best-effort
+            return {"qr_code": qr_code, "status": state}
         except Exception as exc:
-            raise HTTPException(502, f"Evolution API unreachable: {exc}") from exc
+            raise HTTPException(503, f"Evolution API unreachable: {exc}") from exc
+
+
+@app.delete("/v1/numbers/{num_id}")
+async def delete_number(num_id: str, principal: Principal = Depends(RequireRole("admin"))):
+    """Delete a number and its related routes (clean cascade)."""
+    from cante.models import Number, Route
+    from sqlalchemy import delete as sqldelete
+
+    async with async_session_factory() as session:
+        num = await load_owned(session, Number, num_id, principal)
+        # Delete routes that reference this number first
+        await session.execute(sqldelete(Route).where(Route.number_id == num_id))
+        await log_audit(session, principal, "number.delete", f"number:{num.id}", before={"phone": num.phone, "display_name": num.display_name})
+        await session.delete(num)
+        await session.commit()
+        return {"deleted": True}
 
 
 @app.post("/v1/numbers/{num_id}/disconnect")
@@ -489,7 +553,7 @@ async def disconnect_number(num_id: str, principal: Principal = Depends(RequireR
                 "instance_id": state.instance_id,
             }
         except Exception as exc:
-            raise HTTPException(502, f"Evolution API unreachable: {exc}") from exc
+            raise HTTPException(503, f"Evolution API unreachable: {exc}") from exc
 
 
 # ── Bots ────────────────────────────────────────────────────────────
@@ -543,7 +607,7 @@ async def list_skills(cursor: str = "", limit: int = DEFAULT_PAGE_SIZE, principa
     async with async_session_factory() as session:
         page = await paginate(session, Skill, cursor=cursor, limit=limit)
         return {
-            "items": [{"id": s.id, "name": s.name, "preset": s.preset, "language_default": s.language_default, "enabled": s.enabled, "playbook_md": s.playbook_md[:200]} for s in page["items"]],
+            "items": [{"id": s.id, "name": s.name, "preset": s.preset, "language_default": s.language_default, "enabled": s.enabled, "playbook_md": s.playbook_md, "guardrails_md": s.guardrails_md, "scope": s.scope, "tools": s.tools, "done_condition": s.done_condition, "escalation": s.escalation} for s in page["items"]],
             "total": page["total"],
             "next_cursor": page["next_cursor"],
         }
