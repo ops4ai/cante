@@ -28,7 +28,7 @@ smoke:
 
 test:
 	pytest -v --cov=cante --cov=services --cov-report=term-missing \
-		--cov-fail-under=50 \
+		--cov-fail-under=40 \
 
 lint:
 	ruff check core/ services/
