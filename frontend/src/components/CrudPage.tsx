@@ -1,4 +1,5 @@
 import { ReactNode, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from 'react-query'
 import { PageHeader } from './PageHeader'
 import { Table, Column } from './Table'
@@ -26,18 +27,21 @@ interface CrudConfig<T> {
   list: (cursor: string) => Promise<{ items: T[]; next_cursor: string | null }>
   create?: (body: Record<string, unknown>) => Promise<T>
   patch?: (id: string, body: Record<string, unknown>) => Promise<T>
+  del?: (id: string) => Promise<unknown>
   fields: FieldDef[]
   columns: Column<T>[]
   canWrite?: boolean
 }
 
 export function CrudPage<T extends { id: string }>(cfg: CrudConfig<T>) {
+  const { t } = useTranslation()
   const qc = useQueryClient()
   const [cursor, setCursor] = useState<string | undefined>(undefined)
   const [rows, setRows] = useState<T[]>([])
   const [next, setNext] = useState<string | null>(null)
   const [showCreate, setShowCreate] = useState(false)
   const [editRow, setEditRow] = useState<T | null>(null)
+  const [confirmDel, setConfirmDel] = useState<T | null>(null)
 
   const { isLoading, isError, error } = useQuery([cfg.queryKey, cursor], () => list(cfg, cursor), {
     keepPreviousData: true,
@@ -53,30 +57,37 @@ export function CrudPage<T extends { id: string }>(cfg: CrudConfig<T>) {
   const patchMut = useMutation((args: { id: string; body: Record<string, unknown> }) => (cfg.patch ?? (() => Promise.reject()))(args.id, args.body), {
     onSuccess: () => { qc.invalidateQueries(cfg.queryKey); setEditRow(null) },
   })
+  const delMut = useMutation((id: string) => (cfg.del ?? (() => Promise.reject()))(id), {
+    onSuccess: () => { qc.invalidateQueries(cfg.queryKey); setConfirmDel(null) },
+  })
 
   const canWrite = cfg.canWrite !== false && !!cfg.create
-  const cols = cfg.patch
-    ? [...cfg.columns, { key: '_edit', header: '', render: (r: T) => <Button variant="ghost" onClick={() => setEditRow(r)}>Edit</Button> } as Column<T>]
-    : cfg.columns
+  const cols: Column<T>[] = [...cfg.columns]
+  if (cfg.patch) {
+    cols.push({ key: '_edit', header: '', render: (r: T) => <Button variant="ghost" onClick={() => setEditRow(r)}>{t('common.edit')}</Button> } as Column<T>)
+  }
+  if (cfg.del) {
+    cols.push({ key: '_del', header: '', render: (r: T) => <Button variant="ghost" className="text-red-600" onClick={() => setConfirmDel(r)}>{t('common.delete')}</Button> } as Column<T>)
+  }
 
   return (
     <div>
       <PageHeader
-        title={cfg.title}
-        subtitle={cfg.subtitle}
-        action={canWrite && <Button onClick={() => setShowCreate(true)}>+ New</Button>}
+        title={t(`${cfg.queryKey}.title`, cfg.title)}
+        subtitle={t(`${cfg.queryKey}.subtitle`, cfg.subtitle)}
+        action={canWrite && <Button onClick={() => setShowCreate(true)}>+ {t('common.create')}</Button>}
       />
-      {isError && <ErrorState message={(error as Error)?.message ?? 'Failed to load'} />}
+      {isError && <ErrorState message={(error as Error)?.message ?? t('common.failed_load')} />}
       {isLoading && rows.length === 0 && <Spinner />}
-      {!isLoading && rows.length === 0 && <EmptyState message={`No ${cfg.title.toLowerCase()} yet.`} />}
+      {!isLoading && rows.length === 0 && <EmptyState message={t('common.no_data')} />}
       {rows.length > 0 && (
-        <Table columns={cols} rows={rows} loading={isLoading} nextCursor={next} onLoadMore={() => next && setCursor(next)} />
+        <Table columns={cols.map(c => ({ ...c, header: c.header ? t(`${cfg.queryKey}.col.${c.key}`, c.header) : '' }))} rows={rows} loading={isLoading} nextCursor={next} onLoadMore={() => next && setCursor(next)} />
       )}
 
       {showCreate && (
         <FormModal
-          title={`New ${cfg.title.slice(0, -1)}`}
-          fields={cfg.fields}
+          title={`${t('common.create')} ${cfg.title.slice(0, -1)}`}
+          fields={cfg.fields.map(f => ({ ...f, label: t(`${cfg.queryKey}.field.${f.name}`, f.label) }))}
           submitting={createMut.isLoading}
           error={createMut.error ? String(createMut.error) : null}
           onClose={() => setShowCreate(false)}
@@ -85,14 +96,26 @@ export function CrudPage<T extends { id: string }>(cfg: CrudConfig<T>) {
       )}
       {editRow && (
         <FormModal
-          title={`Edit ${cfg.title.slice(0, -1)}`}
-          fields={cfg.fields}
+          title={`${t('common.edit')} ${cfg.title.slice(0, -1)}`}
+          fields={cfg.fields.map(f => ({ ...f, label: t(`${cfg.queryKey}.field.${f.name}`, f.label) }))}
           initial={editRow as Record<string, unknown>}
           submitting={patchMut.isLoading}
           error={patchMut.error ? String(patchMut.error) : null}
           onClose={() => setEditRow(null)}
           onSubmit={(v) => patchMut.mutate({ id: editRow.id, body: v })}
         />
+      )}
+      {confirmDel && (
+        <Modal open onClose={() => setConfirmDel(null)} title={`Delete ${cfg.title.slice(0, -1)}`}>
+          <p className="text-sm text-gray-600">Are you sure you want to delete this {cfg.title.slice(0, -1).toLowerCase()}?</p>
+          {delMut.error ? <div className="mt-2 rounded bg-red-50 p-2 text-xs text-red-700">{String(delMut.error)}</div> : null}
+          <div className="mt-4 flex justify-end gap-2">
+            <Button variant="ghost" onClick={() => setConfirmDel(null)}>{t('common.cancel')}</Button>
+            <Button variant="danger" disabled={delMut.isLoading} onClick={() => delMut.mutate(confirmDel.id)}>
+              {delMut.isLoading ? 'Deleting…' : 'Delete'}
+            </Button>
+          </div>
+        </Modal>
       )}
     </div>
   )
@@ -117,6 +140,7 @@ function FormModal({ title, fields, initial, onSubmit, onClose, submitting, erro
   submitting: boolean
   error: string | null
 }) {
+  const { t } = useTranslation()
   const [values, setValues] = useState<Record<string, unknown>>(() => {
     const v: Record<string, unknown> = {}
     for (const f of fields) {
@@ -171,8 +195,8 @@ function FormModal({ title, fields, initial, onSubmit, onClose, submitting, erro
         ))}
         {error && <div className="rounded bg-red-50 p-2 text-xs text-red-700">{error}</div>}
         <div className="flex justify-end gap-2">
-          <Button variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button disabled={submitting} onClick={onSubmitInner}>{submitting ? 'Saving…' : 'Save'}</Button>
+          <Button variant="ghost" onClick={onClose}>{t('common.cancel')}</Button>
+          <Button disabled={submitting} onClick={onSubmitInner}>{submitting ? t('common.saving') : t('common.save')}</Button>
         </div>
       </div>
     </Modal>

@@ -9,18 +9,21 @@ visible in logs rather than silently dropping messages.
 import asyncio
 import random
 import signal
+import time
 
 import structlog
 
 from cante.bus import RedisStreamsBus
 from cante.db import async_session_factory
 from cante.evolution import EvolutionAdapter
-from cante.redis import get_redis
+from cante.redis import get_redis, health_redis, on_redis_timeout, on_redis_success
 from cante.settings import settings
 
 logger = structlog.get_logger(__name__)
 running = True
 S_OUT, GROUP, CONSUMER = "stream:outbound", "senders", "sender-1"
+_last_queue_check = 0.0
+QUEUE_STALE_MINUTES = 5
 
 
 def _sigterm(*_):
@@ -75,7 +78,38 @@ async def send_one(data: dict, channel: EvolutionAdapter):
         logger.error("sender.send_failed", to=to, error=str(e))
 
 
+async def _check_queue_health(bus):
+    """Check whether the consumer group has unacked (pending) entries sitting too long.
+
+    The raw stream ``xlen``/``xrange`` is NOT a staleness signal: acked entries
+    linger in the stream until trimmed, so the oldest raw entry can be hours old
+    while nothing is actually stuck. The real signal is the consumer-group PEL —
+    entries delivered but not acked. We report those only.
+    """
+    global _last_queue_check
+    now = time.monotonic()
+    if now - _last_queue_check < 60:
+        return
+    _last_queue_check = now
+    try:
+        pending, oldest = await bus.pending_oldest(S_OUT, GROUP)
+        if pending > 0 and oldest:
+            ms_timestamp = int(oldest.split("-")[0])
+            age_minutes = (int(time.time() * 1000) - ms_timestamp) / 60000
+            if age_minutes > QUEUE_STALE_MINUTES:
+                logger.warning(
+                    "sender.queue_stale",
+                    queue=S_OUT,
+                    pending=pending,
+                    oldest_age_minutes=round(age_minutes, 1),
+                )
+    except Exception:
+        pass  # best-effort monitoring
+
+
+
 async def main():
+    global running
     signal.signal(signal.SIGTERM, _sigterm)
     signal.signal(signal.SIGINT, _sigterm)
     redis = await get_redis()
@@ -83,16 +117,56 @@ async def main():
     await bus.create_group(S_OUT, GROUP)
     channel = EvolutionAdapter()
     logger.info("sender.started")
+
+    # ── Health check (stdlib TCP, no extra dependencies) ──────────────
+    async def health_server():
+        async def handler(reader, writer):
+            try:
+                redis_ok = await health_redis()
+                status = "200" if redis_ok["ok"] else "503"
+                body = f'{{"service":"sender","redis":{redis_ok}}}'
+                writer.write(f"HTTP/1.1 {status} OK\r\nContent-Length: {len(body)}\r\n\r\n{body}".encode())
+                await writer.drain()
+            except Exception:
+                writer.write(b"HTTP/1.1 503\r\n\r\n")
+            writer.close()
+
+        server = await asyncio.start_server(handler, "0.0.0.0", 9000)
+        logger.info("sender.healthz_started", port=9000)
+        async with server:
+            await server.serve_forever()
+
+    _health_task = asyncio.create_task(health_server())
+
     while running:
         try:
-            for e in await bus.consume(
+            events = await bus.consume(
                 S_OUT, GROUP, CONSUMER, count=5, block_ms=5000
-            ):
+            )
+            for e in events:
                 await send_one(e.data, channel)
                 await bus.ack(S_OUT, GROUP, e.id)
+            if events:
+                # Housekeeping: drop acked entries so the stream doesn't
+                # accumulate dead replies (which would otherwise make a raw
+                # xlen/xrange staleness check report phantom old messages).
+                await bus.trim_delivered(S_OUT, GROUP)
+            on_redis_success()
         except Exception as e:
-            logger.error("sender.loop", error=str(e))
+            err = str(e)
+            logger.error("sender.loop", error=err)
+            if "Timeout" in err:
+                reset = on_redis_timeout()
+                if reset:
+                    logger.warning("sender.redis_reset", reason="consecutive_timeouts")
+                    redis = await get_redis()
+                    bus = RedisStreamsBus(redis)
+                    await bus.create_group(S_OUT, GROUP)
             await asyncio.sleep(2)
+
+        await _check_queue_health(bus)
+
+    _health_task.cancel()
     logger.info("sender.stopped")
 
 

@@ -107,3 +107,70 @@ class RedisStreamsBus(EventBus):
         for msg_id, data in messages or []:
             entries.append(StreamEntry(id=msg_id, data=dict(data or {})))
         return entries
+
+    async def trim_delivered(self, stream: str, group: str) -> int:
+        """XTRIM entries already delivered to *group*, but only when none are pending.
+
+        Housekeeping for the outbound stream: acked entries otherwise linger in
+        the stream until evicted by the ``xadd maxlen`` cap, which makes a raw
+        ``xlen``/``xrange`` staleness check report phantom hours-old messages
+        (issue: ``sender.queue_stale`` false alarm).
+
+        Safe by construction:
+          - skips when the group's pending-PEL is non-empty, so an unacked entry
+            (whose id is below ``last-delivered-id``) is never dropped out from
+            under a consumer;
+          - uses ``MINID = last-delivered-id``, so entries never delivered to the
+            group (id above it) are never removed.
+
+        Returns the number of entries trimmed (0 if nothing was removed).
+        """
+        try:
+            # xinfo_groups takes ONLY the stream name (returns ALL groups for it);
+            # we then locate *group* in the result.
+            groups = await self._redis.xinfo_groups(stream)
+        except redis.exceptions.ResponseError as e:
+            if "NOGROUP" in str(e) or "no such key" in str(e).lower():
+                return 0
+            raise
+        except Exception:
+            return 0  # best-effort housekeeping — never break the send loop
+        g = next((x for x in (groups or []) if x.get("name") == group), None)
+        if not g or g.get("pending"):
+            return 0
+        last = g.get("last-delivered-id")
+        if not last:
+            return 0
+        # Approximate MINID trim: drop everything strictly below the last id the
+        # group consumed. pending==0 guarantees nothing in-flight sits below it.
+        try:
+            return await self._redis.xtrim(stream, minid=str(last), approximate=True)
+        except Exception:
+            return 0
+
+    async def pending_oldest(self, stream: str, group: str) -> tuple[int, str | None]:
+        """Return (pending_count, oldest_pending_id) for real staleness checks.
+
+        ``pending_count`` is the number of delivered-but-unacked entries in the
+        group (the only entries that are genuinely "stuck"). ``oldest_pending_id``
+        is the lowest such id (a stream id like ``1783447427569-0``) or ``None``
+        when nothing is pending. Unlike raw ``xlen``/``xrange``, this ignores
+        already-acked entries that merely linger in the stream.
+        """
+        try:
+            summary = await self._redis.xpending(stream, group)
+        except redis.exceptions.ResponseError as e:
+            if "NOGROUP" in str(e) or "no such key" in str(e).lower():
+                return 0, None
+            raise
+        except Exception:
+            return 0, None
+        if isinstance(summary, dict):
+            pending = int(summary.get("pending", 0) or 0)
+            oldest = summary.get("min")
+            return pending, (str(oldest) if oldest else None)
+        # Fallback shape: [pending, min, max, [(consumer, count), ...]]
+        try:
+            return int(summary[0]), (str(summary[1]) if summary[1] else None)
+        except (IndexError, TypeError):
+            return 0, None

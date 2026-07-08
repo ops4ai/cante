@@ -7,6 +7,9 @@ import { NumbersPage } from './pages/NumbersPage'
 import { ConversationsPage } from './pages/ConversationsPage'
 import { ConversationDetail } from './pages/ConversationDetail'
 import { BotsPage, SkillsPage, ProvidersPage, RoutesPage, ContactsPage, GroupsPage } from './pages/CrudPages'
+import { MetricsPage } from './pages/MetricsPage'
+import { LearningsPage } from './pages/LearningsPage'
+import { UsersPage } from './pages/UsersPage'
 
 export default function App() {
   return (
@@ -29,6 +32,9 @@ export default function App() {
         <Route path="routes" element={<RoutesPage />} />
         <Route path="contacts" element={<ContactsPage />} />
         <Route path="groups" element={<GroupsPage />} />
+        <Route path="metrics" element={<MetricsPage />} />
+        <Route path="learnings" element={<LearningsPage />} />
+        <Route path="users" element={<UsersPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

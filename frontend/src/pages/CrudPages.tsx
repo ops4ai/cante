@@ -1,9 +1,11 @@
 import { CrudPage, asCode } from '../components/CrudPage'
 import type { Column } from '../components/Table'
-import type { Bot, Skill, Provider, Route, Contact } from '../api/types'
-import { listBots, createBot, patchBot, listSkills, createSkill, patchSkill, listProviders, createProvider, patchProvider, listRoutes, createRoute, listContacts, patchContact } from '../api/crud'
+import type { Bot, Skill, Provider, Route, Contact, Number } from '../api/types'
+import { listBots, createBot, patchBot, listSkills, createSkill, patchSkill, deleteSkill, listProviders, createProvider, patchProvider, listRoutes, createRoute, patchRoute, deleteRoute, listContacts, patchContact } from '../api/crud'
+import { listNumbers } from '../api/numbers'
 import { apiFetch } from '../api/client'
 import { useAuth } from '../auth/AuthContext'
+import { useMutation, useQueryClient } from 'react-query'
 
 function useIsAdmin() {
   const { principal } = useAuth()
@@ -32,8 +34,8 @@ export function BotsPage() {
       columns={columns}
       fields={[
         { name: 'name', label: 'Name', required: true },
-        { name: 'skill_id', label: 'Skill ID', required: true, placeholder: 'paste skill id' },
-        { name: 'provider_id', label: 'Provider ID', required: true, placeholder: 'paste provider id' },
+        { name: 'skill_id', label: 'Skill', required: true, type: 'asyncSelect', placeholder: 'Select a skill…', loadOptions: async () => { const d = await listSkills(); return d.items.map((s: Skill) => ({ value: s.id, label: `${s.name} (${s.preset})` })) } },
+        { name: 'provider_id', label: 'Provider', required: true, type: 'asyncSelect', placeholder: 'Select a provider…', loadOptions: async () => { const d = await listProviders(); return d.items.map((p: Provider) => ({ value: p.id, label: `${p.name} (${p.model})` })) } },
         { name: 'type_label', label: 'Type label', default: 'custom' },
         { name: 'language_default', label: 'Default language', default: 'en' },
         { name: 'enabled', label: 'Enabled', type: 'select', default: 'true', options: [{ value: 'true', label: 'Yes' }, { value: 'false', label: 'No' }] },
@@ -57,6 +59,7 @@ export function SkillsPage() {
       list={listSkills}
       create={isAdmin ? createSkill : undefined}
       patch={isAdmin ? patchSkill : undefined}
+      del={isAdmin ? deleteSkill : undefined}
       canWrite={isAdmin}
       columns={columns}
       fields={[
@@ -105,11 +108,28 @@ export function ProvidersPage() {
 
 export function RoutesPage() {
   const isAdmin = useIsAdmin()
+  const qc = useQueryClient()
+  const toggleMut = useMutation(
+    ({ id, enabled }: { id: string; enabled: boolean }) => patchRoute(id, { enabled }),
+    { onSuccess: () => qc.invalidateQueries('routes') },
+  )
   const columns: Column<Route>[] = [
-    { key: 'number', header: 'Number', render: (r) => asCode(r.number_id?.slice(0, 8)) },
-    { key: 'bot', header: 'Bot', render: (r) => asCode(r.bot_id?.slice(0, 8)) },
+    { key: 'number', header: 'Number', render: (r: any) => <span className="font-mono text-xs">{r.number_phone || r.number_id?.slice(0, 8)}</span> },
+    { key: 'bot', header: 'Bot', render: (r: any) => <span className="text-xs">{r.bot_name || r.bot_id?.slice(0, 8)}</span> },
     { key: 'selector', header: 'Selector', render: (r) => asCode(r.selector) },
     { key: 'priority', header: 'Priority', render: (r) => r.priority },
+    {
+      key: 'enabled',
+      header: 'On',
+      render: (r: any) => (
+        <button
+          onClick={() => toggleMut.mutate({ id: r.id, enabled: !r.enabled })}
+          className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${r.enabled !== false ? 'bg-green-500' : 'bg-gray-300'}`}
+        >
+          <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform ${r.enabled !== false ? 'translate-x-[18px]' : 'translate-x-[3px]'}`} />
+        </button>
+      ),
+    },
   ]
   return (
     <CrudPage<Route>
@@ -118,13 +138,18 @@ export function RoutesPage() {
       queryKey="routes"
       list={listRoutes}
       create={isAdmin ? createRoute : undefined}
+      del={isAdmin ? deleteRoute : undefined}
       canWrite={isAdmin}
       columns={columns}
       fields={[
-        { name: 'number_id', label: 'Number ID', required: true },
-        { name: 'bot_id', label: 'Bot ID', required: true },
-        { name: 'selector', label: 'Selector', default: 'default' },
-        { name: 'selector_value', label: 'Selector value' },
+        { name: 'number_id', label: 'Number', required: true, type: 'asyncSelect', placeholder: 'Select a number…', loadOptions: async () => { const d = await listNumbers(); return d.items.map((n: Number) => ({ value: n.id, label: `${n.phone}${n.display_name ? ' — ' + n.display_name : ''}` })) } },
+        { name: 'bot_id', label: 'Bot', required: true, type: 'asyncSelect', placeholder: 'Select a bot…', loadOptions: async () => { const d = await listBots(); return d.items.map((b: Bot) => ({ value: b.id, label: `${b.name} (${b.type_label})` })) } },
+        { name: 'selector', label: 'Selector', type: 'select', default: 'default', options: [
+          { value: 'default', label: 'default — all messages' },
+          { value: 'contact_group', label: 'contact_group — by contact group' },
+          { value: 'keyword_prefix', label: 'keyword_prefix — by message keyword' },
+        ]},
+        { name: 'selector_value', label: 'Selector value', placeholder: 'Group ID or keyword prefix', showIf: (v) => v.selector !== 'default' },
         { name: 'priority', label: 'Priority', type: 'number', default: 0 },
       ]}
     />
@@ -136,6 +161,7 @@ export function ContactsPage() {
   const columns: Column<Contact>[] = [
     { key: 'phone', header: 'Phone', render: (c) => asCode(c.phone) },
     { key: 'name', header: 'Name', render: (c) => c.name || '—' },
+    { key: 'status', header: 'Status', render: (c) => c.status === 'blocked' ? '🚫 Blocked' : '✓ Active' },
   ]
   return (
     <CrudPage<Contact>
@@ -149,6 +175,10 @@ export function ContactsPage() {
       fields={[
         { name: 'name', label: 'Name' },
         { name: 'attributes', label: 'Attributes (JSON)', type: 'json' },
+        { name: 'status', label: 'Status', type: 'select', options: [
+          { value: 'active', label: '✓ Active — bot responds normally' },
+          { value: 'blocked', label: '🚫 Blocked — silently ignore messages' },
+        ]},
       ]}
     />
   )

@@ -191,9 +191,9 @@ async def seed():
             existing = (await session.execute(select(Skill).where(Skill.name == "Youth Sports Trainer"))).scalar_one_or_none()
             if not existing:
                 session.add(Skill(
-                    name="Youth Sports Trainer", preset="trainer", language_default="en",
-                    playbook_md="## Who you are\nYou are a youth sports coach's assistant. You help parents with schedules, absences, and game info.\n\n## What you can do\n- Check the game schedule\n- Report a player's absence\n- Send messages to parents\n\n## Tone\nEncouraging, clear, team-spirited.",
-                    guardrails_md="Only discuss team schedules, absences, games, training, and youth sports. Politely redirect anything else.",
+                    name="Youth Sports Trainer", preset="trainer", language_default="pt",
+                    playbook_md="## Quem és\nÉs o assistente de um treinador de desporto juvenil. Ajudas os pais com horários, faltas e informações sobre jogos.\n\n## O que podes fazer\n- Consultar o calendário de jogos\n- Registar a falta de um jogador\n- Enviar mensagens aos pais\n\n## Tom\nEncorajador, claro, com espírito de equipa. Fala português de Portugal, trata os pais por 'você'.",
+                    guardrails_md="Fala apenas sobre horários, faltas, jogos, treinos e desporto juvenil. Redireciona educadamente qualquer outro assunto.",
                     scope={"in": ["schedule","absences","games","training","teams","players","sports"], "out_policy": "redirect_then_escalate", "max_offscope_turns": 2},
                     tools={"builtin": ["lookup_or_create_contact","close_conversation","escalate_to_human"], "declared": [
                         {"name":"get_schedule","description":"Get the team game schedule","input_schema":{"type":"object","properties":{"team":{"type":"string"}},"required":["team"]},"http":{"method":"GET","url":"http://mock-backend:9000/schedule?team={team}","headers":{},"timeout_s":10,"allowed_hosts":["mock-backend"]},"response_mapping":"json"},

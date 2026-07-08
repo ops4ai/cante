@@ -37,8 +37,9 @@ docs/reports/
 .DS_Store
 
 
-# (Forks keep their own private overlay + identity denylist in their own
-# .gitignore additions; the motor has nothing fork-specific to ignore here.)
+# Private fork — contamination denylist stays local (scanning list, not source).
+# Real secrets/runtime data stay out (the motor's .env is gitignored upstream).
+identity-tokens.txt
 
 # Editor / agent artifacts (never publish)
 .claude/

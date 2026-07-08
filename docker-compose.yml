@@ -161,7 +161,7 @@ services:
   evolution:
     # Image moved registries in v2.3.0: atendai/evolution-api -> evoapicloud/evolution-api
     # (the old name no longer pulls and had vulnerabilities fixed in v2.3.x).
-    image: evoapicloud/evolution-api:latest
+    image: evoapicloud/evolution-api:v2.3.7
     container_name: ${INSTANCE:+cante-}${INSTANCE:-cante}-evolution
     restart: unless-stopped
     environment:

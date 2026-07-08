@@ -3,8 +3,20 @@
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column, relationship
 
 from cante.db import Base
@@ -169,6 +181,7 @@ class Contact(Base, TenantScoped):
     phone: Mapped[str] = mapped_column(String(30), nullable=False, unique=True)
     name: Mapped[str] = mapped_column(String(200), default="")
     attributes: Mapped[dict] = mapped_column(JSONB, default=dict)
+    status: Mapped[str] = mapped_column(String(20), default="active")  # active | blocked
     first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
@@ -266,6 +279,15 @@ class Learning(Base, TenantScoped):
     suggestion_md: Mapped[str] = mapped_column(Text, default="")
     category: Mapped[str] = mapped_column(String(50), default="")
     status: Mapped[str] = mapped_column(String(20), default="pending")
+    # New fields for automated learning
+    diagnosis: Mapped[str] = mapped_column(Text, default="")
+    suggestion_type: Mapped[str] = mapped_column(String(30), default="no_action")  # prompt|guardrail|none
+    suggestion_payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+    confidence: Mapped[float] = mapped_column(default=0.0)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    applied_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    raw_llm_response: Mapped[dict] = mapped_column(JSONB, default=dict)
+    run_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     reviewed_by: Mapped[str | None] = mapped_column(UUID(as_uuid=False), ForeignKey("users.id"), nullable=True)
 
@@ -314,3 +336,41 @@ class Secret(Base, TenantScoped):
     value_encrypted: Mapped[str] = mapped_column(Text, default="")
     env_ref: Mapped[str] = mapped_column(String(100), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+# ── Metrics ────────────────────────────────────────────────────────────
+
+
+class DailyMetrics(Base):
+    """Pre-computed daily metrics cache.
+
+    Past days are computed once (static), today is recomputed periodically.
+    Scoped per tenant via ``tenant_id``. Array columns hold per-conversation
+    values for percentile calculations (e.g. P50/P95 response times).
+    """
+
+    __tablename__ = "daily_metrics"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)  # noqa: F821
+    tenant_id: Mapped[str] = mapped_column(UUID(as_uuid=False), default=SEEDED_TENANT)
+    date: Mapped[datetime] = mapped_column(Date, nullable=False)
+    # Conversation states
+    conversations_total: Mapped[int] = mapped_column(Integer, default=0)
+    conversations_escalated: Mapped[int] = mapped_column(Integer, default=0)
+    conversations_closed: Mapped[int] = mapped_column(Integer, default=0)
+    conversations_active: Mapped[int] = mapped_column(Integer, default=0)
+    # Message counts
+    messages_in: Mapped[int] = mapped_column(Integer, default=0)
+    messages_out: Mapped[int] = mapped_column(Integer, default=0)
+    # Tokens
+    tokens_total: Mapped[int] = mapped_column(BigInteger, default=0)  # noqa: F821
+    # Arrays for percentiles (PostgreSQL array of floats/ints)
+    first_reply_seconds: Mapped[list] = mapped_column(ARRAY(Float), default=list)  # noqa: F821
+    resolution_seconds: Mapped[list] = mapped_column(ARRAY(Float), default=list)  # noqa: F821
+    message_counts: Mapped[list] = mapped_column(ARRAY(Integer), default=list)  # noqa: F821
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "date", name="uq_daily_metrics_date"),
+        Index("idx_dm_tenant_date", "tenant_id", "date"),
+    )

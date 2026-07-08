@@ -38,6 +38,9 @@ async def lifespan(_app: FastAPI):
     except Exception as e:  # pragma: no cover - startup logging only
         logger.error("api.migration_failed", error=str(e))
         raise
+    # Ensure metrics cache table exists (created outside the alembic migration)
+    from cante.metrics import ensure_table as ensure_metrics_table
+    await ensure_metrics_table()
     yield
 
 
@@ -266,6 +269,7 @@ class RouteCreateIn(BaseModel):
 class ContactUpdateIn(BaseModel):
     name: str | None = None
     attributes: dict | None = None
+    status: str | None = None  # "active" | "blocked"
 
 
 class GroupCreateIn(BaseModel):
@@ -361,7 +365,85 @@ async def refresh(data: RefreshIn):
 
 @app.get("/v1/auth/me")
 async def me(principal: Principal = Depends(get_current_user)):
-    return {"id": principal.user_id, "role": principal.role, "tenant_id": principal.tenant_id}
+    from cante.models import User
+    from cante.tenant import with_tenant
+    from sqlalchemy import select
+    async with async_session_factory() as session:
+        with with_tenant(principal.tenant_id):
+            u = (await session.execute(select(User).where(User.id == principal.user_id))).scalar_one_or_none()
+    return {
+        "id": principal.user_id,
+        "email": u.email if u else "",
+        "role": principal.role,
+        "tenant_id": principal.tenant_id,
+        "language_ui": u.language_ui if u else "en",
+    }
+
+
+class UpdateMeIn(BaseModel):
+    language_ui: str | None = None
+
+
+@app.patch("/v1/auth/me")
+async def update_me(data: UpdateMeIn, principal: Principal = Depends(get_current_user)):
+    from cante.models import User
+    from cante.tenant import with_tenant
+    from sqlalchemy import select, update
+    async with async_session_factory() as session:
+        with with_tenant(principal.tenant_id):
+            vals = {}
+            if data.language_ui is not None:
+                vals["language_ui"] = data.language_ui
+            if vals:
+                await session.execute(update(User).where(User.id == principal.user_id).values(**vals))
+                await session.commit()
+            u = (await session.execute(select(User).where(User.id == principal.user_id))).scalar_one_or_none()
+    return {
+        "id": principal.user_id,
+        "email": u.email if u else "",
+        "role": principal.role,
+        "tenant_id": principal.tenant_id,
+        "language_ui": u.language_ui if u else "en",
+    }
+
+
+@app.get("/v1/auth/users")
+async def list_users(cursor: str = "", limit: int = DEFAULT_PAGE_SIZE, principal: Principal = Depends(RequireRole("admin"))):
+    from cante.models import User
+    async with async_session_factory() as session:
+        page = await paginate(session, User, cursor=cursor, limit=limit)
+        return {
+            "items": [{"id": u.id, "email": u.email, "role": u.role, "language_ui": u.language_ui, "created_at": str(u.created_at)} for u in page["items"]],
+            "total": page["total"],
+            "next_cursor": page["next_cursor"],
+        }
+
+
+class UpdateUserIn(BaseModel):
+    role: str | None = None
+    language_ui: str | None = None
+    email: str | None = None
+
+
+@app.patch("/v1/auth/users/{user_id}")
+async def update_user(user_id: str, data: UpdateUserIn, principal: Principal = Depends(RequireRole("admin"))):
+    from cante.models import User
+    from sqlalchemy import update
+    async with async_session_factory() as session:
+        vals = {}
+        if data.role is not None:
+            vals["role"] = data.role
+        if data.language_ui is not None:
+            vals["language_ui"] = data.language_ui
+        if data.email is not None:
+            vals["email"] = data.email
+        if vals:
+            await session.execute(
+                update(User).where(User.id == user_id, User.tenant_id == principal.tenant_id).values(**vals)
+            )
+            await log_audit(session, principal, "user.update", f"user:{user_id}", after=vals)
+            await session.commit()
+        return {"id": user_id, **vals}
 
 
 @app.post("/v1/auth/users")
@@ -542,13 +624,22 @@ async def connect_number(num_id: str, principal: Principal = Depends(RequireRole
 
 @app.delete("/v1/numbers/{num_id}")
 async def delete_number(num_id: str, principal: Principal = Depends(RequireRole("admin"))):
-    """Delete a number and its related routes (clean cascade)."""
-    from cante.models import Number, Route
-    from sqlalchemy import delete as sqldelete
+    """Delete a number and all related data (cascade)."""
+    from cante.models import Conversation, Message, Number, Route
+    from sqlalchemy import delete as sqldelete, select
 
     async with async_session_factory() as session:
         num = await load_owned(session, Number, num_id, principal)
-        # Delete routes that reference this number first
+        # 1. Find conversation IDs for this number
+        conv_ids = (
+            await session.execute(
+                select(Conversation.id).where(Conversation.number_id == num_id)
+            )
+        ).scalars().all()
+        # 2. Delete messages → conversations → routes (FK order)
+        if conv_ids:
+            await session.execute(sqldelete(Message).where(Message.conversation_id.in_(conv_ids)))
+        await session.execute(sqldelete(Conversation).where(Conversation.number_id == num_id))
         await session.execute(sqldelete(Route).where(Route.number_id == num_id))
         await log_audit(session, principal, "number.delete", f"number:{num.id}", before={"phone": num.phone, "display_name": num.display_name})
         await session.delete(num)
@@ -573,6 +664,9 @@ async def disconnect_number(num_id: str, principal: Principal = Depends(RequireR
         adapter = EvolutionAdapter()
         try:
             await adapter.logout(instance)
+        except Exception:
+            pass  # instance may already be logged out / deleted
+        try:
             number.status = "disconnected"
             await session.commit()
             return {"status": "disconnected", "instance": instance}
@@ -673,6 +767,26 @@ async def update_skill(skill_id: str, data: SkillUpdateIn, principal: Principal 
         await log_audit(session, principal, "skill.update", f"skill:{s.id}", after={"name": s.name, "version": max_v + 1})
         await session.commit()
         return {"id": s.id, "name": s.name, "version": max_v + 1}
+
+
+@app.delete("/v1/skills/{skill_id}")
+async def delete_skill(skill_id: str, principal: Principal = Depends(RequireRole("admin"))):
+    """Delete a skill. Refuses if any bot still references it."""
+    from cante.models import Bot, Skill
+    from sqlalchemy import func, select
+
+    async with async_session_factory() as session:
+        skill = await load_owned(session, Skill, skill_id, principal)
+        # Check if any bot uses this skill
+        bot_count = (await session.execute(
+            select(func.count(Bot.id)).where(Bot.skill_id == skill_id)
+        )).scalar() or 0
+        if bot_count > 0:
+            raise HTTPException(409, f"Cannot delete: {bot_count} bot(s) still use this skill. Reassign or delete them first.")
+        await log_audit(session, principal, "skill.delete", f"skill:{skill.id}", before={"name": skill.name})
+        await session.delete(skill)
+        await session.commit()
+        return {"deleted": True}
 
 
 # ── Providers ───────────────────────────────────────────────────────
@@ -791,11 +905,22 @@ async def test_provider(provider_id: str, principal: Principal = Depends(Require
 
 @app.get("/v1/routes")
 async def list_routes(cursor: str = "", limit: int = DEFAULT_PAGE_SIZE, principal: Principal = Depends(tenant_context)):
-    from cante.models import Route
+    from cante.models import Route, Number, Bot
+    from sqlalchemy import select
     async with async_session_factory() as session:
         page = await paginate(session, Route, cursor=cursor, limit=limit)
+        # Pre-fetch number phones and bot names for human-readable display
+        num_ids = {r.number_id for r in page["items"]}
+        bot_ids = {r.bot_id for r in page["items"]}
+        nums = {n.id: n.phone for n in (await session.execute(select(Number).where(Number.id.in_(num_ids)))).scalars().all()} if num_ids else {}
+        bots = {b.id: b.name for b in (await session.execute(select(Bot).where(Bot.id.in_(bot_ids)))).scalars().all()} if bot_ids else {}
         return {
-            "items": [{"id": r.id, "number_id": r.number_id, "bot_id": r.bot_id, "selector": r.selector, "selector_value": r.selector_value, "enabled": r.enabled} for r in page["items"]],
+            "items": [{
+                "id": r.id, "number_id": r.number_id, "bot_id": r.bot_id,
+                "number_phone": nums.get(r.number_id, ""),
+                "bot_name": bots.get(r.bot_id, ""),
+                "selector": r.selector, "selector_value": r.selector_value, "enabled": r.enabled,
+            } for r in page["items"]],
             "total": page["total"],
             "next_cursor": page["next_cursor"],
         }
@@ -811,6 +936,34 @@ async def create_route(data: RouteCreateIn, principal: Principal = Depends(Requi
         await log_audit(session, principal, "route.create", f"route:{r.id}", after={"number_id": r.number_id, "bot_id": r.bot_id, "selector": r.selector})
         await session.commit()
         return {"id": r.id, "selector": r.selector}
+
+
+class RouteUpdateIn(BaseModel):
+    enabled: bool | None = None
+    selector: str | None = None
+    selector_value: str | None = None
+    priority: int | None = None
+
+
+@app.patch("/v1/routes/{route_id}")
+async def update_route(route_id: str, data: RouteUpdateIn, principal: Principal = Depends(RequireRole("admin"))):
+    from cante.models import Route
+    from sqlalchemy import update
+    async with async_session_factory() as session:
+        vals: dict[str, object] = {}
+        if data.enabled is not None:
+            vals["enabled"] = data.enabled
+        if data.selector is not None:
+            vals["selector"] = data.selector
+        if data.selector_value is not None:
+            vals["selector_value"] = data.selector_value
+        if data.priority is not None:
+            vals["priority"] = data.priority
+        if vals:
+            await session.execute(update(Route).where(Route.id == route_id).values(**vals))
+            await log_audit(session, principal, "route.update", f"route:{route_id}", after=vals)
+            await session.commit()
+        return {"id": route_id, **vals}
 
 
 @app.delete("/v1/routes/{route_id}")
@@ -865,7 +1018,7 @@ async def list_contacts(
             rows = rows[:limit]
 
         return {
-            "items": [{"id": c.id, "phone": c.phone, "name": c.name, "attributes": c.attributes, "first_seen": str(c.first_seen), "last_seen": str(c.last_seen)} for c in rows],
+            "items": [{"id": c.id, "phone": c.phone, "name": c.name, "attributes": c.attributes, "status": c.status, "first_seen": str(c.first_seen), "last_seen": str(c.last_seen)} for c in rows],
             "total": total,
             "next_cursor": str(rows[-1].last_seen) if has_more and rows else None,
         }
@@ -876,14 +1029,16 @@ async def update_contact(contact_id: str, data: ContactUpdateIn, principal: Prin
     from cante.models import Contact
     async with async_session_factory() as session:
         c = await load_owned(session, Contact, contact_id, principal)
-        before = {"name": c.name, "attributes": c.attributes}
+        before = {"name": c.name, "attributes": c.attributes, "status": c.status}
         if data.name is not None:
             c.name = data.name
         if data.attributes is not None:
             c.attributes = {**c.attributes, **data.attributes}
-        await log_audit(session, principal, "contact.update", f"contact:{c.id}", before=before, after={"name": c.name, "attributes": c.attributes})
+        if data.status is not None:
+            c.status = data.status
+        await log_audit(session, principal, "contact.update", f"contact:{c.id}", before=before, after={"name": c.name, "attributes": c.attributes, "status": c.status})
         await session.commit()
-        return {"id": c.id, "name": c.name}
+        return {"id": c.id, "name": c.name, "status": c.status}
 
 
 # ── Contact Groups ──────────────────────────────────────────────────
@@ -1020,7 +1175,7 @@ async def takeover(conv_id: str, principal: Principal = Depends(tenant_context))
 @app.post("/v1/conversations/{conv_id}/send")
 async def send_as_human(conv_id: str, data: SendAsHumanIn, principal: Principal = Depends(tenant_context)):
     from cante.bus import RedisStreamsBus
-    from cante.models import Conversation, Number
+    from cante.models import Conversation, Message, Number
     from cante.redis import get_redis
     from sqlalchemy import select
     async with async_session_factory() as session:
@@ -1029,6 +1184,15 @@ async def send_as_human(conv_id: str, data: SendAsHumanIn, principal: Principal 
         # outbound message carries the correct sender, not an empty string.
         number = (await session.execute(select(Number).where(Number.id == conv.number_id))).scalar_one_or_none()
         number_phone = number.phone if number else ""
+        # Persist the human message so the learning system can analyze what
+        # was said to resolve the escalation.
+        session.add(Message(
+            tenant_id=principal.tenant_id,
+            conversation_id=conv_id,
+            direction="out",
+            role="human",
+            body=data.body,
+        ))
         redis = await get_redis()
         bus = RedisStreamsBus(redis)
         await bus.publish("stream:outbound", {"conversation_id": conv_id, "from_phone": "", "number_phone": number_phone, "body": data.body})
@@ -1084,6 +1248,11 @@ async def list_learnings(cursor: str = "", limit: int = DEFAULT_PAGE_SIZE, statu
                     "suggestion_md": learning.suggestion_md[:200],
                     "category": learning.category,
                     "status": learning.status,
+                    "diagnosis": learning.diagnosis,
+                    "suggestion_type": learning.suggestion_type,
+                    "confidence": learning.confidence,
+                    "conversation_id": learning.conversation_id,
+                    "created_at": str(learning.created_at),
                 }
                 for learning in rows
             ],
@@ -1094,19 +1263,50 @@ async def list_learnings(cursor: str = "", limit: int = DEFAULT_PAGE_SIZE, statu
 
 @app.post("/v1/learnings/{learning_id}/approve")
 async def approve_learning(learning_id: str, principal: Principal = Depends(tenant_context)):
-    from cante.models import Learning
+    """Approve a learning and auto-apply it to the bot's skill.
+
+    - prompt_addition → appends to the skill's playbook_md
+    - guardrail_addition → appends to the skill's guardrails_md
+    - no_action → just marks as approved, no changes
+    """
+    from cante.models import Bot, Conversation, Learning, Skill
+    from datetime import datetime, timezone
+
     async with async_session_factory() as session:
         learning = await load_owned(session, Learning, learning_id, principal)
         before = {"status": learning.status}
         learning.status = "approved"
         learning.reviewed_by = principal.user_id
+        now = datetime.now(timezone.utc)
+        learning.applied_at = now
+
+        # Auto-apply: update the skill's playbook or guardrails
+        st = learning.suggestion_type or "no_action"
+        if st in ("prompt_addition", "guardrail_addition"):
+            conv = await session.get(Conversation, learning.conversation_id)
+            if conv:
+                bot = await session.get(Bot, conv.bot_id)
+                if bot:
+                    skill = await session.get(Skill, bot.skill_id)
+                    if skill:
+                        payload = learning.suggestion_payload or {}
+                        new_text = (payload.get("text") or learning.suggestion_md or "").strip()
+                        if new_text:
+                            if st == "prompt_addition":
+                                skill.playbook_md = (skill.playbook_md or "") + "\n\n" + new_text
+                                learning.applied_ref = f"skill:{skill.id}:playbook_md"
+                            else:
+                                skill.guardrails_md = (skill.guardrails_md or "") + "\n\n" + new_text
+                                learning.applied_ref = f"skill:{skill.id}:guardrails_md"
+                            session.add(skill)
+
         await log_audit(
             session, principal, "learning.approve",
             f"learning:{learning.id}",
-            before=before, after={"status": learning.status},
+            before=before, after={"status": learning.status, "applied_ref": learning.applied_ref},
         )
         await session.commit()
-        return {"id": learning.id, "status": "approved"}
+        return {"id": learning.id, "status": "approved", "applied": bool(learning.applied_ref)}
 
 
 @app.post("/v1/learnings/{learning_id}/reject")
@@ -1126,53 +1326,102 @@ async def reject_learning(learning_id: str, principal: Principal = Depends(tenan
         return {"id": learning.id, "status": "rejected"}
 
 
-# ── Metrics ──────────────────────────────────────────────────────────
+@app.post("/v1/learnings/{learning_id}/snooze")
+async def snooze_learning(learning_id: str, principal: Principal = Depends(tenant_context)):
+    from cante.models import Learning
+    async with async_session_factory() as session:
+        learning = await load_owned(session, Learning, learning_id, principal)
+        before = {"status": learning.status}
+        learning.status = "snoozed"
+        await log_audit(
+            session, principal, "learning.snooze",
+            f"learning:{learning.id}",
+            before=before, after={"status": learning.status},
+        )
+        await session.commit()
+        return {"id": learning.id, "status": "snoozed"}
 
-@app.get("/v1/metrics/overview")
-async def metrics_overview(principal: Principal = Depends(tenant_context)):
-    """Single-query dashboard counters (C9 — collapsed from 7 queries to 1)."""
-    from cante.models import Bot, Conversation, Message, Number
-    from sqlalchemy import case, func, select
+
+@app.get("/v1/learnings/stats")
+async def learnings_stats(principal: Principal = Depends(tenant_context)):
+    """Aggregated counts: total, pending, approved, rejected, snoozed, by_category, by_type."""
+    from cante.models import Learning
+    from sqlalchemy import func, select
 
     async with async_session_factory() as session:
-        row = (
+        rows = (
             await session.execute(
                 select(
-                    func.count(Conversation.id).label("total_conversations"),
-                    func.count(
-                        case((Conversation.state == "needs_human", 1))
-                    ).label("escalated"),
-                    func.count(
-                        case((Conversation.state == "active", 1))
-                    ).label("active"),
-                    func.count(
-                        case((Conversation.state == "closed", 1))
-                    ).label("closed"),
-                    select(func.count(Bot.id))
-                    .correlate(None)
-                    .scalar_subquery()
-                    .label("total_bots"),
-                    select(func.count(Number.id))
-                    .correlate(None)
-                    .scalar_subquery()
-                    .label("total_numbers"),
-                    select(func.count(Message.id))
-                    .correlate(None)
-                    .scalar_subquery()
-                    .label("total_messages"),
+                    func.count(Learning.id).label("total"),
+                    func.count(func.nullif(Learning.status != "pending", True)).label("pending"),
+                    func.count(func.nullif(Learning.status != "approved", True)).label("approved"),
+                    func.count(func.nullif(Learning.status != "rejected", True)).label("rejected"),
+                    func.count(func.nullif(Learning.status != "snoozed", True)).label("snoozed"),
                 )
             )
         ).one()
+
+        # By category
+        cat_rows = (
+            await session.execute(
+                select(Learning.category, func.count(Learning.id))
+                .group_by(Learning.category)
+                .order_by(func.count(Learning.id).desc())
+            )
+        ).all()
+
+        # By suggestion type
+        type_rows = (
+            await session.execute(
+                select(Learning.suggestion_type, func.count(Learning.id))
+                .group_by(Learning.suggestion_type)
+                .order_by(func.count(Learning.id).desc())
+            )
+        ).all()
+
         return {
-            "total_conversations": row.total_conversations or 0,
-            "escalated": row.escalated or 0,
-            "active": row.active or 0,
-            "closed": row.closed or 0,
-            "total_bots": row.total_bots or 0,
-            "total_numbers": row.total_numbers or 0,
-            "total_messages": row.total_messages or 0,
+            "total": rows.total or 0,
+            "pending": rows.pending or 0,
+            "approved": rows.approved or 0,
+            "rejected": rows.rejected or 0,
+            "snoozed": rows.snoozed or 0,
+            "by_category": {r[0] or "other": r[1] for r in cat_rows},
+            "by_type": {r[0] or "no_action": r[1] for r in type_rows},
         }
 
+
+@app.post("/v1/learnings/analyze")
+async def trigger_analysis(_principal: Principal = Depends(RequireRole("admin"))):
+    """Manually trigger the daily learning analysis (admin only).
+
+    Runs synchronously — may take several seconds if many candidates.
+    """
+    import asyncio as _asyncio
+    import sys as _sys
+    import os as _os
+
+    # Run the scheduler's _daily_learning in a subprocess so it doesn't block
+    # the API event loop on LLM calls.
+    try:
+        proc = await _asyncio.create_subprocess_exec(
+            _sys.executable, "-c",
+            "import asyncio; from services.scheduler.main import _daily_learning; asyncio.run(_daily_learning())",
+            stdout=_asyncio.subprocess.PIPE,
+            stderr=_asyncio.subprocess.PIPE,
+            cwd=_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))),
+        )
+        stdout, stderr = await proc.communicate()
+        return {
+            "status": "triggered",
+            "exit_code": proc.returncode,
+            "stdout": stdout.decode()[-500:] if stdout else "",
+            "stderr": stderr.decode()[-500:] if stderr else "",
+        }
+    except Exception as exc:
+        raise HTTPException(500, f"Failed to trigger analysis: {exc}") from exc
+
+
+# ── Metrics ──────────────────────────────────────────────────────────
 
 # ── Audit ───────────────────────────────────────────────────────────
 
@@ -1206,6 +1455,35 @@ async def create_trigger(data: TriggerCreateIn, request: Request):
     bus = RedisStreamsBus(redis)
     await bus.publish("stream:triggers", {"conversation_id": data.conversation_id, "from_phone": data.to_phone, "number_phone": data.from_number, "body": data.body})
     return {"status": "queued"}
+
+
+# ── Metrics ───────────────────────────────────────────────────────────
+
+
+@app.get("/v1/metrics/overview")
+async def metrics_overview(
+    from_date: str = "",
+    to_date: str = "",
+    principal: Principal = Depends(tenant_context),
+):
+    """Aggregated metrics for a date range (default: last 7 days)."""
+    from datetime import date, timedelta
+
+    from cante.metrics import ensure_days_cached, get_metrics_overview
+
+    today = date.today()
+    if to_date:
+        to_d = date.fromisoformat(to_date)
+    else:
+        to_d = today
+    if from_date:
+        from_d = date.fromisoformat(from_date)
+    else:
+        from_d = to_d - timedelta(days=7)
+
+    await ensure_days_cached(from_d, to_d, principal.tenant_id)
+    data = await get_metrics_overview(from_d, to_d, principal.tenant_id)
+    return {"success": True, "data": data}
 
 
 if __name__ == "__main__":

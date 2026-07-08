@@ -119,6 +119,7 @@ async def webhook(channel_id: str, request: Request, event: str = ""):
     except Exception:
         return JSONResponse({"error": "invalid json"}, status_code=400)
 
+
     bus = RedisStreamsBus(redis)
     messages = _parse(raw, channel_id)
 

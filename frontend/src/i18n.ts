@@ -1,0 +1,341 @@
+import i18n from 'i18next'
+import { initReactI18next } from 'react-i18next'
+
+const en = {
+  common: {
+    save: 'Save', cancel: 'Cancel', delete: 'Delete', edit: 'Edit', create: 'Create',
+    saving: 'Saving…', creating: 'Creating…', loading: 'Loading…',
+    confirm: 'Confirm', close: 'Close', search: 'Search', back: 'Back',
+    no_data: 'No data yet.',
+    failed_load: 'Failed to load',
+    sign_out: 'Sign out',
+  },
+  nav: {
+    dashboard: 'Dashboard', numbers: 'Numbers', conversations: 'Conversations',
+    bots: 'Bots', skills: 'Skills', providers: 'Providers', routes: 'Routes',
+    contacts: 'Contacts', groups: 'Groups', metrics: 'Metrics', learnings: 'Learnings',
+    users: 'Users',
+  },
+  numbers: {
+    title: 'Numbers', subtitle: 'WhatsApp numbers connected to this instance',
+    phone: 'Phone', display_name: 'Display name', channel: 'Channel', status: 'Status',
+    actions: 'Actions', connect: 'Connect', disconnect: 'Disconnect', qr: 'QR',
+    connected: 'Connected', disconnected: 'Disconnected',
+    new_number: 'New number', create_number: 'Create',
+    phone_placeholder: '+351…',
+    confirm_delete: 'Delete this number, its routes and all conversations?',
+    empty: 'No numbers yet. Create one and connect it by QR.',
+  },
+  bots: {
+    title: 'Bots', subtitle: 'Agent configurations (Skill + Provider + language)',
+    col: { name: 'Name', type: 'Type', lang: 'Language', enabled: 'Enabled', skill: 'Skill', provider: 'Provider' },
+    field: { name: 'Name', skill_id: 'Skill', provider_id: 'Provider', type_label: 'Type label', language_default: 'Default language', enabled: 'Enabled' },
+  },
+  skills: {
+    title: 'Skills', subtitle: 'Markdown playbooks that define bot behavior',
+    col: { name: 'Name', preset: 'Preset', lang: 'Language' },
+    field: { name: 'Name', preset: 'Preset', language_default: 'Default language', playbook_md: 'Playbook (Markdown)', guardrails_md: 'Guardrails (Markdown)', done_condition: 'Done condition', scope: 'Scope (JSON)', tools: 'Tools (JSON)' },
+  },
+  providers: {
+    title: 'Providers', subtitle: 'LLM endpoints (model + URL + API key reference)',
+    col: { name: 'Name', type: 'Type', model: 'Model', base: 'Base URL' },
+    field: { name: 'Name', type: 'Type', base_url: 'Base URL', model: 'Model', api_key_ref: 'API key env var name', params: 'Params (JSON)' },
+  },
+  routes: {
+    title: 'Routes', subtitle: 'Connect a Number to a Bot',
+    col: { number: 'Number', bot: 'Bot', selector: 'Selector', priority: 'Priority' },
+    field: { number_id: 'Number', bot_id: 'Bot', selector: 'Selector', selector_value: 'Selector value', priority: 'Priority' },
+  },
+  contacts: {
+    title: 'Contacts', subtitle: 'People who have messaged your numbers',
+    col: { phone: 'Phone', name: 'Name' },
+    field: { phone: 'Phone', name: 'Name', attributes: 'Attributes (JSON)' },
+  },
+  groups: { title: 'Groups', subtitle: 'Contact groups (read-only list for now)' },
+  metrics: {
+    title: 'Metrics', subtitle: 'Usage and performance analytics',
+    conversations: 'Conversations', escalated: 'Escalated', closed: 'Closed',
+    msgs_in: 'Messages In', msgs_out: 'Messages Out', tokens: 'Tokens',
+    reply_p50: '1st reply P50', reply_p95: '1st reply P95', res_p50: 'Resolution P50', res_p95: 'Resolution P95',
+    avg_msgs: 'Avg msgs/conv', median: 'median', slowest: 'slowest 5%', per_convo: 'per convo',
+    today: 'Today', last7: 'Last 7 days', last30: 'Last 30 days',
+    chart_convs: 'Conversations per day', chart_msgs: 'Messages per day', chart_tokens: 'Token usage per day',
+    inbound: 'Inbound', outbound: 'Outbound',
+  },
+  learnings: {
+    title: 'Learnings', subtitle: 'LLM-generated suggestions from escalated conversations',
+    total: 'Total', pending: 'Pending', approved: 'Approved', rejected: 'Rejected', snoozed: 'Snoozed',
+    run_analysis: 'Run Analysis', running: 'Running…',
+    empty: 'No learnings yet. Escalated conversations will be analyzed daily at 4am.',
+    detail_title: 'Learning', approve_apply: 'Approve & Apply', reject: 'Reject',
+  },
+  users: {
+    title: 'Users', subtitle: 'Manage backoffice users and their roles',
+    col_email: 'Email', col_role: 'Role', col_lang: 'Language',
+    new_user: 'New user', empty: 'No users found.',
+    field_email: 'Email', field_password: 'Password',
+  },
+  conversations: {
+    title: 'Conversations', subtitle: 'Live conversations across your numbers (auto-refreshes)',
+    col: { number: 'Number', bot: 'Bot', contact: 'Contact', state: 'State', last: 'Last activity' },
+    all_states: 'All states', state_bot: 'Bot', state_human: 'Human', state_escalated: 'Escalated', state_closed: 'Closed',
+    empty: 'No conversations yet. Send a WhatsApp message to a connected number.',
+    refresh: 'Refresh now',
+  },
+  conv: {
+    takeover: 'Take over', close: 'Close', send: 'Send', sending: 'Sending…',
+    type_human: 'Type as human…', no_messages: 'No messages yet.',
+    closed: 'This conversation is closed.',
+    bot_handling: 'Bot is handling this conversation. Click Take over to reply as a human.',
+  },
+  dashboard: { subtitle: 'Overview of your cante instance' },
+}
+
+const pt = {
+  common: {
+    save: 'Guardar', cancel: 'Cancelar', delete: 'Apagar', edit: 'Editar', create: 'Criar',
+    saving: 'A guardar…', creating: 'A criar…', loading: 'A carregar…',
+    confirm: 'Confirmar', close: 'Fechar', search: 'Procurar', back: 'Voltar',
+    no_data: 'Sem dados.',
+    failed_load: 'Erro ao carregar',
+    sign_out: 'Sair',
+  },
+  nav: {
+    dashboard: 'Painel', numbers: 'Números', conversations: 'Conversas',
+    bots: 'Bots', skills: 'Competências', providers: 'Fornecedores', routes: 'Rotas',
+    contacts: 'Contactos', groups: 'Grupos', metrics: 'Métricas', learnings: 'Aprendizagens',
+    users: 'Utilizadores',
+  },
+  numbers: {
+    title: 'Números', subtitle: 'Números WhatsApp ligados a esta instância',
+    phone: 'Telefone', display_name: 'Nome', channel: 'Canal', status: 'Estado',
+    actions: 'Ações', connect: 'Ligar', disconnect: 'Desligar', qr: 'QR',
+    connected: 'Ligado', disconnected: 'Desligado',
+    new_number: 'Novo número', create_number: 'Criar',
+    phone_placeholder: '+351…',
+    confirm_delete: 'Apagar este número, as suas rotas e todas as conversas?',
+    empty: 'Sem números. Crie um e ligue por QR.',
+  },
+  bots: {
+    title: 'Bots', subtitle: 'Configurações de agentes (Skill + Fornecedor + idioma)',
+    col: { name: 'Nome', type: 'Tipo', lang: 'Idioma', enabled: 'Ativo', skill: 'Skill', provider: 'Fornecedor' },
+    field: { name: 'Nome', skill_id: 'Skill', provider_id: 'Fornecedor', type_label: 'Rótulo', language_default: 'Idioma padrão', enabled: 'Ativo' },
+  },
+  skills: {
+    title: 'Competências', subtitle: 'Playbooks em Markdown que definem o comportamento dos bots',
+    col: { name: 'Nome', preset: 'Predefinição', lang: 'Idioma' },
+    field: { name: 'Nome', preset: 'Predefinição', language_default: 'Idioma padrão', playbook_md: 'Playbook (Markdown)', guardrails_md: 'Guardrails (Markdown)', done_condition: 'Condição de conclusão', scope: 'Âmbito (JSON)', tools: 'Ferramentas (JSON)' },
+  },
+  providers: {
+    title: 'Fornecedores', subtitle: 'Endpoints LLM (modelo + URL + chave API)',
+    col: { name: 'Nome', type: 'Tipo', model: 'Modelo', base: 'Base URL' },
+    field: { name: 'Nome', type: 'Tipo', base_url: 'Base URL', model: 'Modelo', api_key_ref: 'Variável da chave API', params: 'Parâmetros (JSON)' },
+  },
+  routes: {
+    title: 'Rotas', subtitle: 'Ligar um Número a um Bot',
+    col: { number: 'Número', bot: 'Bot', selector: 'Seletor', priority: 'Prioridade' },
+    field: { number_id: 'Número', bot_id: 'Bot', selector: 'Seletor', selector_value: 'Valor do seletor', priority: 'Prioridade' },
+  },
+  contacts: {
+    title: 'Contactos', subtitle: 'Pessoas que enviaram mensagens',
+    col: { phone: 'Telefone', name: 'Nome' },
+    field: { phone: 'Telefone', name: 'Nome', attributes: 'Atributos (JSON)' },
+  },
+  groups: { title: 'Grupos', subtitle: 'Grupos de contactos (apenas leitura)' },
+  metrics: {
+    title: 'Métricas', subtitle: 'Análise de utilização e desempenho',
+    conversations: 'Conversas', escalated: 'Escaladas', closed: 'Fechadas',
+    msgs_in: 'Mensagens Ent.', msgs_out: 'Mensagens Saída', tokens: 'Tokens',
+    reply_p50: '1ª resposta P50', reply_p95: '1ª resposta P95', res_p50: 'Resolução P50', res_p95: 'Resolução P95',
+    avg_msgs: 'Média msgs/conv', median: 'mediana', slowest: '5% mais lento', per_convo: 'por conversa',
+    today: 'Hoje', last7: 'Últimos 7 dias', last30: 'Últimos 30 dias',
+    chart_convs: 'Conversas por dia', chart_msgs: 'Mensagens por dia', chart_tokens: 'Tokens por dia',
+    inbound: 'Entrada', outbound: 'Saída',
+  },
+  learnings: {
+    title: 'Aprendizagens', subtitle: 'Sugestões geradas por LLM a partir de conversas escaladas',
+    total: 'Total', pending: 'Pendentes', approved: 'Aprovadas', rejected: 'Rejeitadas', snoozed: 'Adiadas',
+    run_analysis: 'Executar Análise', running: 'A executar…',
+    empty: 'Sem aprendizagens. Conversas escaladas serão analisadas diariamente às 4h.',
+    detail_title: 'Aprendizagem', approve_apply: 'Aprovar e Aplicar', reject: 'Rejeitar',
+  },
+  users: {
+    title: 'Utilizadores', subtitle: 'Gerir utilizadores do backoffice',
+    col_email: 'Email', col_role: 'Cargo', col_lang: 'Idioma',
+    new_user: 'Novo utilizador', empty: 'Nenhum utilizador.',
+    field_email: 'Email', field_password: 'Senha',
+  },
+  conversations: {
+    title: 'Conversas', subtitle: 'Conversas em tempo real nos seus números (atualização automática)',
+    col: { number: 'Número', bot: 'Bot', contact: 'Contacto', state: 'Estado', last: 'Última atividade' },
+    all_states: 'Todos', state_bot: 'Bot', state_human: 'Humano', state_escalated: 'Escalado', state_closed: 'Fechado',
+    empty: 'Sem conversas. Envie uma mensagem WhatsApp para um número ligado.',
+    refresh: 'Atualizar',
+  },
+  conv: {
+    takeover: 'Assumir', close: 'Fechar', send: 'Enviar', sending: 'A enviar…',
+    type_human: 'Escrever como humano…', no_messages: 'Sem mensagens.',
+    closed: 'Esta conversa está fechada.',
+    bot_handling: 'O bot está a gerir esta conversa. Clique Assumir para responder como humano.',
+  },
+  dashboard: { subtitle: 'Visão geral da instância cante' },
+}
+
+const es = {
+  common: {
+    save: 'Guardar', cancel: 'Cancelar', delete: 'Eliminar', edit: 'Editar', create: 'Crear',
+    saving: 'Guardando…', creating: 'Creando…', loading: 'Cargando…',
+    confirm: 'Confirmar', close: 'Cerrar', search: 'Buscar', back: 'Volver',
+    no_data: 'Sin datos.',
+    failed_load: 'Error al cargar',
+    sign_out: 'Salir',
+  },
+  nav: {
+    dashboard: 'Panel', numbers: 'Números', conversations: 'Conversaciones',
+    bots: 'Bots', skills: 'Habilidades', providers: 'Proveedores', routes: 'Rutas',
+    contacts: 'Contactos', groups: 'Grupos', metrics: 'Métricas', learnings: 'Aprendizajes',
+    users: 'Usuarios',
+  },
+  numbers: {
+    title: 'Números', subtitle: 'Números de WhatsApp conectados',
+    phone: 'Teléfono', display_name: 'Nombre', channel: 'Canal', status: 'Estado',
+    actions: 'Acciones', connect: 'Conectar', disconnect: 'Desconectar', qr: 'QR',
+    connected: 'Conectado', disconnected: 'Desconectado',
+    new_number: 'Nuevo número', create_number: 'Crear',
+    phone_placeholder: '+34…',
+    confirm_delete: '¿Eliminar este número, sus rutas y todas las conversaciones?',
+    empty: 'Sin números. Cree uno y conéctelo por QR.',
+  },
+  bots: {
+    title: 'Bots', subtitle: 'Configuraciones de agentes (Skill + Proveedor + idioma)',
+    col: { name: 'Nombre', type: 'Tipo', lang: 'Idioma', enabled: 'Activo', skill: 'Skill', provider: 'Proveedor' },
+    field: { name: 'Nombre', skill_id: 'Skill', provider_id: 'Proveedor', type_label: 'Etiqueta', language_default: 'Idioma por defecto', enabled: 'Activo' },
+  },
+  skills: {
+    title: 'Habilidades', subtitle: 'Playbooks Markdown que definen el comportamiento',
+    col: { name: 'Nombre', preset: 'Predefinido', lang: 'Idioma' },
+    field: { name: 'Nombre', preset: 'Predefinido', language_default: 'Idioma por defecto', playbook_md: 'Playbook (Markdown)', guardrails_md: 'Guardrails (Markdown)', done_condition: 'Condición de fin', scope: 'Ámbito (JSON)', tools: 'Herramientas (JSON)' },
+  },
+  providers: {
+    title: 'Proveedores', subtitle: 'Endpoints LLM (modelo + URL + clave API)',
+    col: { name: 'Nombre', type: 'Tipo', model: 'Modelo', base: 'URL Base' },
+    field: { name: 'Nombre', type: 'Tipo', base_url: 'URL Base', model: 'Modelo', api_key_ref: 'Var. clave API', params: 'Parámetros (JSON)' },
+  },
+  routes: {
+    title: 'Rutas', subtitle: 'Conectar un Número a un Bot',
+    col: { number: 'Número', bot: 'Bot', selector: 'Selector', priority: 'Prioridad' },
+    field: { number_id: 'Número', bot_id: 'Bot', selector: 'Selector', selector_value: 'Valor selector', priority: 'Prioridad' },
+  },
+  contacts: {
+    title: 'Contactos', subtitle: 'Personas que han enviado mensajes',
+    col: { phone: 'Teléfono', name: 'Nombre' },
+    field: { phone: 'Teléfono', name: 'Nombre', attributes: 'Atributos (JSON)' },
+  },
+  groups: { title: 'Grupos', subtitle: 'Grupos de contactos (solo lectura)' },
+  metrics: { title: 'Métricas', subtitle: 'Análisis de uso y rendimiento' },
+  learnings: { title: 'Aprendizajes', subtitle: 'Sugerencias de mejora' },
+  users: {
+    title: 'Usuarios', subtitle: 'Gestionar usuarios del backoffice',
+    col_email: 'Email', col_role: 'Rol', col_lang: 'Idioma',
+    new_user: 'Nuevo usuario', empty: 'Sin usuarios.',
+    field_email: 'Email', field_password: 'Contraseña',
+  },
+  conversations: {
+    title: 'Conversaciones', subtitle: 'Conversaciones en vivo (auto-actualización)',
+    col: { number: 'Número', bot: 'Bot', contact: 'Contacto', state: 'Estado', last: 'Última actividad' },
+    all_states: 'Todos', state_bot: 'Bot', state_human: 'Humano', state_escalated: 'Escalado', state_closed: 'Cerrado',
+    empty: 'Sin conversaciones. Envíe un WhatsApp a un número conectado.',
+    refresh: 'Actualizar',
+  },
+  conv: {
+    takeover: 'Asumir', close: 'Cerrar', send: 'Enviar', sending: 'Enviando…',
+    type_human: 'Escribir como humano…', no_messages: 'Sin mensajes.',
+    closed: 'Esta conversación está cerrada.',
+    bot_handling: 'El bot gestiona esta conversación. Pulse Asumir para responder como humano.',
+  },
+  dashboard: { subtitle: 'Resumen de la instancia cante' },
+}
+
+const fr = {
+  common: {
+    save: 'Enregistrer', cancel: 'Annuler', delete: 'Supprimer', edit: 'Modifier', create: 'Créer',
+    saving: 'Enregistrement…', creating: 'Création…', loading: 'Chargement…',
+    confirm: 'Confirmer', close: 'Fermer', search: 'Rechercher', back: 'Retour',
+    no_data: 'Aucune donnée.',
+    failed_load: 'Échec du chargement',
+    sign_out: 'Déconnexion',
+  },
+  nav: {
+    dashboard: 'Tableau de bord', numbers: 'Numéros', conversations: 'Conversations',
+    bots: 'Bots', skills: 'Compétences', providers: 'Fournisseurs', routes: 'Routes',
+    contacts: 'Contacts', groups: 'Groupes', metrics: 'Métriques', learnings: 'Apprentissages',
+    users: 'Utilisateurs',
+  },
+  numbers: {
+    title: 'Numéros', subtitle: 'Numéros WhatsApp connectés',
+    phone: 'Téléphone', display_name: 'Nom', channel: 'Canal', status: 'Statut',
+    actions: 'Actions', connect: 'Connecter', disconnect: 'Déconnecter', qr: 'QR',
+    connected: 'Connecté', disconnected: 'Déconnecté',
+    new_number: 'Nouveau numéro', create_number: 'Créer',
+    phone_placeholder: '+33…',
+    confirm_delete: 'Supprimer ce numéro, ses routes et toutes les conversations ?',
+    empty: 'Aucun numéro. Créez-en un et connectez-le par QR.',
+  },
+  bots: {
+    title: 'Bots', subtitle: 'Configurations des agents (Skill + Fournisseur + langue)',
+    col: { name: 'Nom', type: 'Type', lang: 'Langue', enabled: 'Actif', skill: 'Skill', provider: 'Fournisseur' },
+    field: { name: 'Nom', skill_id: 'Skill', provider_id: 'Fournisseur', type_label: 'Étiquette', language_default: 'Langue par défaut', enabled: 'Actif' },
+  },
+  skills: {
+    title: 'Compétences', subtitle: 'Playbooks Markdown définissant le comportement',
+    col: { name: 'Nom', preset: 'Préréglage', lang: 'Langue' },
+    field: { name: 'Nom', preset: 'Préréglage', language_default: 'Langue par défaut', playbook_md: 'Playbook (Markdown)', guardrails_md: 'Guardrails (Markdown)', done_condition: 'Condition de fin', scope: 'Portée (JSON)', tools: 'Outils (JSON)' },
+  },
+  providers: {
+    title: 'Fournisseurs', subtitle: 'Endpoints LLM (modèle + URL + clé API)',
+    col: { name: 'Nom', type: 'Type', model: 'Modèle', base: 'URL de base' },
+    field: { name: 'Nom', type: 'Type', base_url: 'URL de base', model: 'Modèle', api_key_ref: 'Var. clé API', params: 'Paramètres (JSON)' },
+  },
+  routes: {
+    title: 'Routes', subtitle: 'Connecter un Numéro à un Bot',
+    col: { number: 'Numéro', bot: 'Bot', selector: 'Sélecteur', priority: 'Priorité' },
+    field: { number_id: 'Numéro', bot_id: 'Bot', selector: 'Sélecteur', selector_value: 'Valeur sélecteur', priority: 'Priorité' },
+  },
+  contacts: {
+    title: 'Contacts', subtitle: 'Personnes ayant envoyé des messages',
+    col: { phone: 'Téléphone', name: 'Nom' },
+    field: { phone: 'Téléphone', name: 'Nom', attributes: 'Attributs (JSON)' },
+  },
+  groups: { title: 'Groupes', subtitle: 'Groupes de contacts (lecture seule)' },
+  metrics: { title: 'Métriques', subtitle: 'Analyse d\'utilisation et performance' },
+  learnings: { title: 'Apprentissages', subtitle: 'Suggestions d\'amélioration' },
+  users: {
+    title: 'Utilisateurs', subtitle: 'Gérer les utilisateurs du backoffice',
+    col_email: 'Email', col_role: 'Rôle', col_lang: 'Langue',
+    new_user: 'Nouvel utilisateur', empty: 'Aucun utilisateur.',
+    field_email: 'Email', field_password: 'Mot de passe',
+  },
+  conversations: {
+    title: 'Conversations', subtitle: 'Conversations en direct (auto-rafraîchissement)',
+    col: { number: 'Numéro', bot: 'Bot', contact: 'Contact', state: 'État', last: 'Dernière activité' },
+    all_states: 'Tous', state_bot: 'Bot', state_human: 'Humain', state_escalated: 'Escaladé', state_closed: 'Fermé',
+    empty: 'Aucune conversation. Envoyez un WhatsApp à un numéro connecté.',
+    refresh: 'Actualiser',
+  },
+  conv: {
+    takeover: 'Prendre en charge', close: 'Fermer', send: 'Envoyer', sending: 'Envoi…',
+    type_human: 'Écrire comme humain…', no_messages: 'Aucun message.',
+    closed: 'Cette conversation est fermée.',
+    bot_handling: 'Le bot gère cette conversation. Cliquez Prendre en charge pour répondre.',
+  },
+  dashboard: { subtitle: 'Aperçu de l\'instance cante' },
+}
+
+i18n.use(initReactI18next).init({
+  resources: { en: { translation: en }, pt: { translation: pt }, es: { translation: es }, fr: { translation: fr } },
+  lng: 'en',
+  fallbackLng: 'en',
+  interpolation: { escapeValue: false },
+})
+
+export default i18n

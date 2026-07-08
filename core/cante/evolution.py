@@ -80,21 +80,85 @@ class EvolutionAdapter:
         )
 
     @staticmethod
+    def _digits(to: str) -> str:
+        """Return the recipient as digits only (no JID suffix)."""
+        return re.sub(r"[^0-9]", "", str(to or ""))
+
+    @staticmethod
     def _jid(to: str) -> str:
         """Format a recipient as a WhatsApp JID: digits only + @s.whatsapp.net.
 
-        Numbers are stored with a leading ``+`` (e.g. ``+351900000000``); Evolution
-        rejects ``+351...@s.whatsapp.net`` with HTTP 400 (``exists: false``). Strip
-        everything but digits so ``+351900000000`` -> ``351900000000@s.whatsapp.net``.
+        Used for ``sendPresence`` (typing indicators) which does NOT need a Signal
+        session and accepts the explicit JID. Do NOT use this for ``sendText``.
         """
         digits = re.sub(r"[^0-9]", "", str(to or ""))
         return f"{digits}@s.whatsapp.net"
+
+    async def _resolve_lid(self, instance: str, phone: str) -> str:
+        """Resolve a phone number to its ``@lid`` JID via the Evolution Contact table.
+
+        WhatsApp's multi-device LID addressing: a contact's Signal session may live
+        under a ``@lid`` JID, not ``@s.whatsapp.net``. Evolution v2.3.7 delivers
+        reliably to ``@lid`` but **fails with ERROR** when sending to
+        ``@s.whatsapp.net`` for a contact whose session is under ``@lid``
+        (evolution-api #2626). The Evolution webhook normalises ``@lid`` ->
+        ``@s.whatsapp.net`` before dispatch (PRs #1955/#2450), so the bot never
+        sees the LID on inbound.
+
+        The LID<->phone mapping lives in the Evolution ``Contact`` table: the same
+        person has TWO rows — ``<phone>@s.whatsapp.net`` and ``<id>@lid`` — joined
+        by an identical ``profilePicUrl``. We read the phone row's
+        ``profilePicUrl`` then find the ``@lid`` row with the same picture. Returns
+        the ``@lid`` JID if found, else the bare digits (fallback for contacts whose
+        session is genuinely under ``@s.whatsapp.net``).
+
+        The Evolution schema lives in the same Postgres as the cante app (schema
+        ``evolution_api``), so we query it directly via a short-lived async session.
+        """
+        digits = self._digits(phone)
+        if not digits:
+            return ""
+        try:
+            from sqlalchemy import text as sa_text
+
+            from cante.db import async_session_factory
+
+            async with async_session_factory() as session:
+                # Find the @lid row whose profilePicUrl matches the phone row's.
+                row = (
+                    await session.execute(
+                        sa_text(
+                            """
+                            SELECT l."remoteJid"
+                            FROM evolution_api."Contact" p
+                            JOIN evolution_api."Contact" l
+                              ON l."remoteJid" LIKE '%@lid'
+                             AND l."profilePicUrl" = p."profilePicUrl"
+                             AND l."profilePicUrl" IS NOT NULL
+                             AND l."profilePicUrl" <> ''
+                             AND l."instanceId" = p."instanceId"
+                            WHERE p."remoteJid" = :phone_jid
+                            LIMIT 1
+                            """
+                        ),
+                        {"phone_jid": f"{digits}@s.whatsapp.net"},
+                    )
+                ).first()
+                if row and str(row[0]).endswith("@lid"):
+                    return str(row[0])
+        except Exception as e:
+            logger.warning("evolution.lid_lookup_failed", phone=digits, error=str(e)[:120])
+        return digits
 
     async def send_text(self, number_config: dict, to: str, text: str):
         from cante.channel import SentMessage
 
         instance = number_config.get("instance", number_config.get("phone", ""))
         url = f"{self._base_url}/message/sendText/{instance}"
+
+        # Resolve to the contact's @lid when available (LID addressing) so the
+        # message targets the real Signal session; fall back to bare digits.
+        number = await self._resolve_lid(instance, to)
 
         resp = await self._client.post(
             url,
@@ -103,7 +167,7 @@ class EvolutionAdapter:
                 "Content-Type": "application/json",
             },
             json={
-                "number": self._jid(to),
+                "number": number,
                 "text": text,
                 "delay": 1200,
             },
@@ -259,13 +323,15 @@ class EvolutionAdapter:
 
 
 def instance_name_for(phone: str) -> str:
-    """Build a valid Evolution instance name from a phone number.
+    """Build a deterministic Evolution instance name from a phone number.
 
     Evolution instance names are lowercase alphanumerics; a raw phone like
-    ``+351900000000`` is invalid (``+``). Each creation gets a unique suffix
-    so re-creating a Number always yields a fresh WhatsApp pairing QR.
+    ``+351900000000`` is invalid (``+``).
+
+    IMPORTANT — deterministic by design (A2 fix): one phone number maps to
+    exactly one Evolution instance. Re-creating a Number reuses the same
+    instance, preventing the proliferation that causes WhatsApp's 4-device
+    limit to trigger ``device_removed`` / ``stream:error 515`` cycles.
     """
     digits = re.sub(r"[^0-9]", "", phone or "")
-    base = f"cante{digits}" if digits else f"cante{uuid.uuid4().hex[:8]}"
-    # Short random suffix so re-creating a Number never reuses a stale instance
-    return f"{base}{uuid.uuid4().hex[:6]}"
+    return f"cante{digits}" if digits else f"cante{uuid.uuid4().hex[:8]}"

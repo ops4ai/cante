@@ -8,7 +8,7 @@ import structlog
 
 from cante.db import build_provider_adapter, resolve_provider_api_key
 from cante.bus import RedisStreamsBus
-from cante.redis import get_redis
+from cante.redis import get_redis, health_redis, on_redis_timeout, on_redis_success
 from cante.security import assert_no_default_secrets
 from cante.settings import settings
 from cante.tools import DeclaredHttpTool, ToolRegistry
@@ -65,11 +65,22 @@ def detect_language(text: str) -> str | None:
 
 
 _LANG_INSTRUCTION = {
-    "pt-PT": "Responde sempre em português de Portugal (PT-PT, europeu, informal e amigável). Usa vocabulário e expressões de Portugal (ex: 'telemóvel', 'está bem', 'ok'), nunca do Brasil.",
-    "pt-BR": "Responde sempre em português do Brasil (PT-BR, informal e amigável).",
-    "pt": "Responde sempre em português de Portugal (PT-PT, europeu, informal e amigável).",
-    "en": "Always reply in English (clear and friendly).",
-    "es": "Responde siempre en español (informal y amigable).",
+    "pt-PT": (
+        "FALA PORTUGUÊS DE PORTUGAL (PT-PT). Trata o utilizador por 'você'. "
+        "NUNCA uses brasileirismos. Exemplos: equipa (não time), telemóvel (não celular), "
+        "comboio (não trem), autocarro (não ônibus), pequeno-almoço, casa de banho, estás bom?. "
+        "Sê educado, direto, sem emojis desnecessários."
+    ),
+    "pt-BR": (
+        "Fala português do Brasil (PT-BR). Usa 'você' com conjugação brasileira. "
+        "Sê caloroso e expressivo."
+    ),
+    "pt": (
+        "FALA PORTUGUÊS DE PORTUGAL (PT-PT). NUNCA uses brasileirismos "
+        "(time, celular, trem, banheiro, legal, galera, etc.). Sê educado e direto."
+    ),
+    "en": "Reply in English. Be clear, concise, and friendly.",
+    "es": "Responde en español informal y amigable.",
 }
 
 # Map a contact's phone country code to a language variant. +351 = Portugal.
@@ -103,11 +114,23 @@ def _lang_from_phone(phone: str) -> str | None:
 
 
 def build_system_prompt(playbook: str, lang: str | None) -> str:
-    """Build the system prompt, prepending a language instruction when *lang* is set."""
+    """Build the system prompt with language instruction at both ends.
+
+    LLMs weight the beginning and end of prompts more heavily — sandwiching
+    the language rule at both ends reinforces it against a playbook that may
+    be written in a different language or tone.
+    """
     instruction = _LANG_INSTRUCTION.get(lang or "", "")
-    if instruction:
-        return f"{instruction}\n\n{playbook}"
-    return playbook
+    if not instruction:
+        return playbook
+    # Sandwich: instruction at top, playbook in the middle, reminder at bottom
+    return (
+        f"{instruction}\n\n"
+        f"---\n\n"
+        f"{playbook}\n\n"
+        f"---\n\n"
+        f"LEMBRA-TE: {instruction}"
+    )
 
 
 def _sigterm(*_):
@@ -191,9 +214,15 @@ def _build_tools(skill_data: dict | None) -> ToolRegistry:
 
 
 async def run_agent_loop(
-    user_message: str, llm=None, tools=None, *, system_prompt: str | None = None
+    user_message: str, llm=None, tools=None, *, system_prompt: str | None = None,
+    history: list[dict] | None = None,
 ) -> tuple[str, dict]:
-    """Execute the agent loop with tool calling. Returns (reply, context_updates)."""
+    """Execute the agent loop with tool calling. Returns (reply, context_updates).
+
+    *history* is a list of prior turns ``{role, content}`` (role: user|assistant)
+    so the LLM has conversation context — this lets it vary its wording across
+    turns instead of repeating the same reply to similar messages.
+    """
     from cante.llm import LLMMessage, LLMToolDefinition
 
     ctx: dict[str, object] = {}
@@ -205,8 +234,15 @@ async def run_agent_loop(
             role="system",
             content=system_prompt or "You are a helpful assistant. Be concise. Use tools when needed.",
         ),
-        LLMMessage(role="user", content=user_message),
     ]
+    # Recent conversation turns (oldest first) so the model knows what it already
+    # said and can vary phrasing instead of echoing an earlier reply.
+    for turn in history or []:
+        role = turn.get("role", "user")
+        if role not in ("user", "assistant"):
+            role = "user"
+        messages.append(LLMMessage(role=role, content=turn.get("content", "")))
+    messages.append(LLMMessage(role="user", content=user_message))
 
     tool_defs = [LLMToolDefinition(name=t.name, description=t.description, parameters=t.parameters) for t in tools.list_tools()]
 
@@ -244,9 +280,11 @@ async def run_agent_loop(
 async def _resolve_route(from_phone: str, number_phone: str, channel_id: str = ""):
     """Resolve the routing for an inbound message.
 
-    Returns (tenant_id, bot, skill, provider, contact_id, conversation_id) or None
-    if no route matches. Reads happen in a short-lived session (closed before the
-    LLM call — GOTCHAS §1) and the contact is upserted with ON CONFLICT (§2).
+    Returns (tenant_id, bot, skill, provider, contact_id, conversation_id,
+    number_config, number_phone) or None if no route matches, or "blocked" if
+    the contact is blocked. Reads happen in a
+    short-lived session (closed before the LLM call — GOTCHAS §1) and the contact
+    is upserted with ON CONFLICT (§2).
 
     The Number is resolved by ``channel_id`` (its UUID, set by the ingress from
     the webhook path) first, falling back to ``number_phone`` for older channels.
@@ -296,6 +334,16 @@ async def _resolve_route(from_phone: str, number_phone: str, channel_id: str = "
             ).on_conflict_do_update(index_elements=["phone"], set_={"last_seen": now})
             contact_id = (await session.execute(stmt.returning(Contact.id))).scalar_one()
 
+            # Blocked contacts: silently drop — don't create conversation, don't reply.
+            contact_status = (
+                await session.execute(
+                    select(Contact.status).where(Contact.id == contact_id)
+                )
+            ).scalar()
+            if contact_status == "blocked":
+                await session.commit()
+                return "blocked"
+
             conv = (
                 await session.execute(
                     select(Conversation).where(
@@ -312,7 +360,48 @@ async def _resolve_route(from_phone: str, number_phone: str, channel_id: str = "
                 session.add(conv)
                 await session.flush()
             await session.commit()
-        return tenant_id, bot, skill, provider, api_key, contact_id, conv.id
+        return tenant_id, bot, skill, provider, api_key, contact_id, conv.id, dict(number.connection_config or {}), number.phone
+
+
+async def _load_history(conv_id: str, tenant_id: str, limit: int = 8) -> tuple[list[dict], str | None]:
+    """Load recent turns of the conversation for LLM context + dedup.
+
+    Returns (history, last_outbound):
+    - history: up to *limit* prior turns as ``{role, content}`` (role: user for
+      inbound, assistant for outbound), oldest-first, so the LLM knows what it
+      already said and can vary its wording.
+    - last_outbound: the body of the most recent outbound assistant message, for
+      the DedupGuard to detect identical consecutive replies.
+    """
+    from cante.db import async_session_factory
+    from cante.models import Message
+    from cante.tenant import with_tenant
+    from sqlalchemy import select
+
+    async with async_session_factory() as session:
+        with with_tenant(tenant_id):
+            rows = (
+                await session.execute(
+                    select(Message.role, Message.direction, Message.body)
+                    .where(Message.conversation_id == conv_id)
+                    .order_by(Message.created_at.desc())
+                    .limit(limit)
+                )
+            ).all()
+    # rows are newest-first. Find the most recent outbound (for the dedup guard)
+    # before reversing to oldest-first for the LLM message list.
+    last_outbound: str | None = None
+    for _role, direction, body in rows:
+        if direction == "out":
+            last_outbound = body or ""
+            break
+    history: list[dict] = []
+    for _role, direction, body in reversed(rows):
+        history.append({
+            "role": "assistant" if direction == "out" else "user",
+            "content": body or "",
+        })
+    return history, last_outbound
 
 
 async def _resolve_language(conv_id: str, contact_id: str, tenant_id: str, body: str, from_phone: str = "") -> str | None:
@@ -427,26 +516,44 @@ async def process(entry, bus, redis):
             skill_scope = {}
         else:
             route = await _resolve_route(from_phone, number_phone, channel_id)
+            if route == "blocked":
+                logger.info("worker.contact_blocked", from_phone=from_phone)
+                return  # silently drop — no reply, no conversation
             if route is None:
                 logger.warning("worker.no_route", from_phone=from_phone, number_phone=number_phone, channel_id=channel_id)
                 reply = "Sorry, no agent is configured for this number right now."
                 ctx_updates = {}
                 skill_scope = {}
             else:
-                tenant_id, _bot, skill, provider, api_key, _contact_id, conv_id = route
+                tenant_id, _bot, skill, provider, api_key, _contact_id, conv_id, number_cfg, _num_phone = route
                 skill_scope = skill.scope
                 # Persist the inbound message before the LLM call.
                 await _persist_message(conv_id, tenant_id, "in", "user", body)
 
+                # ── Typing indicator ──────────────────────────────────────
+                if number_cfg:
+                    try:
+                        from cante.evolution import EvolutionAdapter
+                        evo = EvolutionAdapter()
+                        await evo.send_presence(number_cfg, from_phone, "composing")
+                    except Exception:
+                        pass  # best-effort: never block the reply for a typing indicator
+
                 # ── Language detection & contact preference ────────────
                 pref_lang = await _resolve_language(conv_id, _contact_id, tenant_id, body, from_phone)
+
+                # Load recent turns so the LLM has context (varies wording across
+                # turns) and the dedup guard knows the last outbound reply.
+                history, last_outbound = await _load_history(conv_id, tenant_id)
 
                 # Build tools + adapter OUTSIDE any DB session (GOTCHAS §1).
                 tools = _build_tools(skill.tools)
                 llm = build_provider_adapter(provider, api_key)
+                system_prompt = build_system_prompt(skill.playbook_md or "", pref_lang)
                 reply, ctx_updates = await run_agent_loop(
                     body, llm, tools,
-                    system_prompt=build_system_prompt(skill.playbook_md or "", pref_lang),
+                    system_prompt=system_prompt,
+                    history=history,
                 )
 
         # ── C12: Guard pipeline ──────────────────────────────────────────
@@ -460,7 +567,26 @@ async def process(entry, bus, redis):
             user_message=body,
             reply=reply,
             scope=skill_scope,
+            last_outbound=last_outbound,
         ))
+        # If a guard asked to regenerate (e.g. dedup: reply identical to the
+        # previous one), re-run the LLM ONCE with an instruction to reformulate.
+        # Generic — applies to any skill; the model varies wording, keeps info.
+        if any(gr.action == "regenerate" and not gr.passed for gr in guard_results):
+            logger.info("worker.regenerate", conv=cid, reason="dedup_or_guard")
+            vary_prompt = (
+                system_prompt
+                + "\n\nIMPORTANT: Your previous reply was identical (or near-identical) to "
+                "one you sent moments ago in this same conversation. Reformulate it: vary "
+                "the wording, sentence order, and phrasing while keeping EXACTLY the same "
+                "information and intent. Do not repeat the same sentences."
+            )
+            try:
+                reply, ctx_updates = await run_agent_loop(
+                    body, llm, tools, system_prompt=vary_prompt, history=history,
+                )
+            except Exception as e:
+                logger.warning("worker.regenerate_failed", conv=cid, error=str(e))
         for gr in guard_results:
             if not gr.passed:
                 logger.info(
@@ -535,6 +661,7 @@ async def _drain(stream: str, bus, redis) -> None:
 
 
 async def main():
+    global running
     signal.signal(signal.SIGTERM, _sigterm)
     signal.signal(signal.SIGINT, _sigterm)
     assert_no_default_secrets()  # S4: refuse to boot with default/empty secrets
@@ -544,14 +671,45 @@ async def main():
     await bus.create_group(S_TRIG, GROUP)
     logger.info("worker.started")
 
+    # ── Health check (stdlib TCP, no extra dependencies) ──────────────
+    async def health_server():
+        async def handler(reader, writer):
+            try:
+                redis_ok = await health_redis()
+                status = "200" if redis_ok["ok"] else "503"
+                body = f'{{"service":"worker","redis":{redis_ok}}}'
+                writer.write(f"HTTP/1.1 {status} OK\r\nContent-Length: {len(body)}\r\n\r\n{body}".encode())
+                await writer.drain()
+            except Exception:
+                writer.write(b"HTTP/1.1 503\r\n\r\n")
+            writer.close()
+
+        server = await asyncio.start_server(handler, "0.0.0.0", 9001)
+        logger.info("worker.healthz_started", port=9001)
+        async with server:
+            await server.serve_forever()
+
+    _health_task = asyncio.create_task(health_server())
+
     while running:
         try:
             await _drain(S_IN, bus, redis)
             await _drain(S_TRIG, bus, redis)
+            on_redis_success()
         except Exception as e:
-            # A redis-down / consume error propagates here (C5) — back off.
-            logger.error("worker.loop", error=str(e))
+            err = str(e)
+            logger.error("worker.loop", error=err)
+            if "Timeout" in err:
+                reset = on_redis_timeout()
+                if reset:
+                    logger.warning("worker.redis_reset", reason="consecutive_timeouts")
+                    redis = await get_redis()
+                    bus = RedisStreamsBus(redis)
+                    await bus.create_group(S_IN, GROUP)
+                    await bus.create_group(S_TRIG, GROUP)
             await asyncio.sleep(2)
+
+    _health_task.cancel()
     logger.info("worker.stopped")
 
 

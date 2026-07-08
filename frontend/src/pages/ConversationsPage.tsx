@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Link } from 'react-router-dom'
 import { useQuery } from 'react-query'
 import { PageHeader } from '../components/PageHeader'
@@ -15,6 +16,7 @@ const STATE_BADGE: Record<string, string> = {
 }
 
 export function ConversationsPage() {
+  const { t } = useTranslation()
   const [cursor, setCursor] = useState<string | undefined>(undefined)
   const [rows, setRows] = useState<Conversation[]>([])
   const [next, setNext] = useState<string | null>(null)
@@ -34,43 +36,36 @@ export function ConversationsPage() {
   )
 
   const cols: Column<Conversation>[] = [
-    {
-      key: 'contact',
-      header: 'Contact',
-      render: (c) => <Link to={`/conversations/${c.id}`} className="font-mono text-xs text-brand-600 hover:underline">{c.contact_id.slice(0, 8)}</Link>,
-    },
-    {
-      key: 'state',
-      header: 'State',
-      render: (c) => <span className={`rounded px-1.5 py-0.5 text-[10px] uppercase ${STATE_BADGE[c.state] ?? 'bg-gray-100 text-gray-600'}`}>{c.state}</span>,
-    },
-    { key: 'bot', header: 'Bot', render: (c) => <code className="text-xs">{c.bot_id?.slice(0, 8) ?? '—'}</code> },
-    { key: 'last', header: 'Last activity', render: (c) => <span className="text-xs text-gray-500">{c.last_activity_at}</span> },
+    { key: 'number', header: t('conversations.col.number'), render: (c) => <code className="text-xs">{c.number_phone || c.number_id?.slice(0, 8) || '—'}</code> },
+    { key: 'bot', header: t('conversations.col.bot'), render: (c) => <span className="text-sm">{c.bot_name || c.bot_id?.slice(0, 8) || '—'}</span> },
+    { key: 'contact', header: t('conversations.col.contact'), render: (c) => <Link to={`/conversations/${c.id}`} className="font-mono text-xs text-brand-600 hover:underline">{c.contact_phone || c.contact_id.slice(0, 8)}</Link> },
+    { key: 'state', header: t('conversations.col.state'), render: (c) => <span className={`rounded px-1.5 py-0.5 text-[10px] uppercase ${STATE_BADGE[c.state] ?? 'bg-gray-100 text-gray-600'}`}>{c.state}</span> },
+    { key: 'last', header: t('conversations.col.last'), render: (c) => <span className="text-xs text-gray-500">{c.last_activity_at}</span> },
   ]
 
   return (
     <div>
       <PageHeader
-        title="Conversations"
-        subtitle="Live conversations across your numbers (auto-refreshes)"
+        title={t('conversations.title')}
+        subtitle={t('conversations.subtitle')}
         action={
           <select className="rounded-md border border-gray-300 px-2 py-1 text-sm" value={state} onChange={(e) => { setState(e.target.value); setCursor(undefined); setRows([]) }}>
-            <option value="">All states</option>
-            <option value="bot">Bot</option>
-            <option value="human">Human</option>
-            <option value="escalated">Escalated</option>
-            <option value="closed">Closed</option>
+            <option value="">{t('conversations.all_states')}</option>
+            <option value="bot">{t('conversations.state_bot')}</option>
+            <option value="human">{t('conversations.state_human')}</option>
+            <option value="escalated">{t('conversations.state_escalated')}</option>
+            <option value="closed">{t('conversations.state_closed')}</option>
           </select>
         }
       />
-      {isError && <ErrorState message={(error as Error)?.message ?? 'Failed to load conversations'} />}
+      {isError && <ErrorState message={(error as Error)?.message ?? t('common.failed_load')} />}
       {isLoading && rows.length === 0 && <Spinner />}
-      {!isLoading && rows.length === 0 && <EmptyState message="No conversations yet. Send a WhatsApp message to a connected number." />}
+      {!isLoading && rows.length === 0 && <EmptyState message={t('conversations.empty')} />}
       {rows.length > 0 && (
         <Table columns={cols} rows={rows} loading={isLoading} nextCursor={next} onLoadMore={() => next && setCursor(next)} />
       )}
       <div className="mt-2 text-xs text-gray-400">
-        <button className="hover:underline" onClick={() => refetch()}>Refresh now</button>
+        <button className="hover:underline" onClick={() => refetch()}>{t('conversations.refresh')}</button>
       </div>
     </div>
   )

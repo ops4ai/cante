@@ -1,4 +1,5 @@
 import { FormEvent, useState, useEffect, useRef } from 'react'
+import { useTranslation } from 'react-i18next'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from 'react-query'
 import { PageHeader } from '../components/PageHeader'
@@ -7,6 +8,7 @@ import { Button, inputCls } from '../components/Modal'
 import { getConversation, takeoverConversation, closeConversation, sendAsHuman } from '../api/conversations'
 
 export function ConversationDetail() {
+  const { t } = useTranslation()
   const { id = '' } = useParams()
   const navigate = useNavigate()
   const qc = useQueryClient()
@@ -32,7 +34,7 @@ export function ConversationDetail() {
 
   const onSend = (e: FormEvent) => { e.preventDefault(); if (draft.trim()) sendMut.mutate(draft.trim()) }
 
-  const isHuman = data?.state === 'human'
+  const isHuman = data?.state === 'human_active' || data?.state === 'human'
   const isClosed = data?.state === 'closed'
 
   return (
@@ -42,18 +44,18 @@ export function ConversationDetail() {
         subtitle={data ? `State: ${data.state}` : undefined}
         action={
           <div className="flex gap-2">
-            {data && !isHuman && !isClosed && <Button variant="ghost" onClick={() => takeoverMut.mutate()}>Take over</Button>}
-            {data && !isClosed && <Button variant="ghost" onClick={() => closeMut.mutate()}>Close</Button>}
-            <Button variant="ghost" onClick={() => navigate('/conversations')}>Back</Button>
+            {data && !isHuman && !isClosed && <Button variant="ghost" onClick={() => takeoverMut.mutate()}>{t('conv.takeover')}</Button>}
+            {data && !isClosed && <Button variant="ghost" onClick={() => closeMut.mutate()}>{t('conv.close')}</Button>}
+            <Button variant="ghost" onClick={() => navigate('/conversations')}>{t('common.back')}</Button>
           </div>
         }
       />
       {isLoading && <Spinner />}
-      {isError && <ErrorState message={(error as Error)?.message ?? 'Failed to load conversation'} />}
+      {isError && <ErrorState message={(error as Error)?.message ?? t('common.failed_load')} />}
       {data && (
         <div className="flex h-[70vh] flex-col">
           <div ref={scrollRef} className="flex-1 space-y-2 overflow-y-auto rounded-lg border border-gray-200 bg-white p-4">
-            {data.messages.length === 0 && <div className="text-center text-sm text-gray-400">No messages yet.</div>}
+            {data.messages.length === 0 && <div className="text-center text-sm text-gray-400">{t('conv.no_messages')}</div>}
             {data.messages.map((m) => {
               const inbound = m.direction === 'inbound'
               return (
@@ -67,15 +69,15 @@ export function ConversationDetail() {
             })}
           </div>
           {isClosed ? (
-            <div className="mt-3 rounded-md bg-gray-100 p-3 text-center text-sm text-gray-500">This conversation is closed.</div>
+            <div className="mt-3 rounded-md bg-gray-100 p-3 text-center text-sm text-gray-500">{t('conv.closed')}</div>
           ) : isHuman ? (
             <form onSubmit={onSend} className="mt-3 flex gap-2">
-              <input className={inputCls} placeholder="Type as human…" value={draft} onChange={(e) => setDraft(e.target.value)} disabled={sendMut.isLoading} />
-              <Button type="submit" disabled={!draft.trim() || sendMut.isLoading}>{sendMut.isLoading ? 'Sending…' : 'Send'}</Button>
+              <input className={inputCls} placeholder={t('conv.type_human')} value={draft} onChange={(e) => setDraft(e.target.value)} disabled={sendMut.isLoading} />
+              <Button type="submit" disabled={!draft.trim() || sendMut.isLoading}>{sendMut.isLoading ? t('conv.sending') : t('conv.send')}</Button>
             </form>
           ) : (
             <div className="mt-3 rounded-md bg-amber-50 p-3 text-center text-xs text-amber-700">
-              Bot is handling this conversation. Click <strong>Take over</strong> to reply as a human.
+              {t('conv.bot_handling')}
             </div>
           )}
           {sendMut.error && <div className="mt-2 text-xs text-red-600">{String(sendMut.error)}</div>}

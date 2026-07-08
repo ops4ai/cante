@@ -1,8 +1,8 @@
-// Minimal service worker: cache the app shell so the backoffice is usable
-// offline / installable on phones. Network-first for /v1 (API), cache-first
-// for static assets. Bump CACHE_VERSION on deploy to refresh the shell.
-const CACHE_VERSION = 'cante-v3';
-const SHELL = ['/', '/index.html', '/manifest.webmanifest', '/favicon.svg'];
+// Minimal service worker: cache static assets (hashed JS/CSS/images) only.
+// HTML pages are NEVER cached — they always come from the network so deploys
+// take effect immediately without a hard-refresh dance.
+const CACHE_VERSION = 'cante-v7';
+const SHELL = ['/manifest.webmanifest', '/favicon.svg'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -20,11 +20,17 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
-  // Never cache the API — always go to network (the live data is the point).
+  // Never cache API calls or HTML pages — always network.
   if (url.pathname.startsWith('/v1/') || url.pathname === '/healthz') {
     return;
   }
-  // Cache-first for everything else (static assets, hashed JS/CSS).
+  // Only cache hashed static assets (JS/CSS/images with content hash in filename).
+  const isHashedAsset = /\/assets\/.*-[a-zA-Z0-9]{8,}\.(js|css|png|svg|ico|woff2?)$/.test(url.pathname);
+  if (!isHashedAsset && !url.pathname.endsWith('.png') && !url.pathname.endsWith('.svg') && !url.pathname.endsWith('.ico') && !url.pathname.endsWith('.webmanifest')) {
+    // HTML pages and other non-hashed requests: network-only, don't cache.
+    return;
+  }
+  // Cache-first for hashed assets (they're immutable — content hash changes on every build).
   event.respondWith(
     caches.match(event.request).then(
       (cached) =>

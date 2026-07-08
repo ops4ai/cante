@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react'
 import { fetchMe, logout as doLogout, isLoggedIn } from '../api/auth'
 import type { Principal } from '../api/types'
+import i18n from '../i18n'
 
 interface AuthState {
   principal: Principal | null
@@ -24,6 +25,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const me = await fetchMe()
       setPrincipal(me)
+      // Sync i18n language with user preference on load
+      if (me.language_ui) {
+        i18n.changeLanguage(me.language_ui)
+      }
     } catch {
       doLogout()
       setPrincipal(null)

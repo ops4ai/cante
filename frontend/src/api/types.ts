@@ -9,6 +9,16 @@ export interface Principal {
   user_id: string
   tenant_id: string
   role: string
+  email?: string
+  language_ui?: string
+}
+
+export interface UserRow {
+  id: string
+  email: string
+  role: string
+  language_ui: string
+  created_at: string
 }
 
 export interface Paginated<T> {
@@ -82,6 +92,7 @@ export interface Contact {
   phone: string
   name: string
   attributes?: Record<string, unknown>
+  status?: string  // "active" | "blocked"
   tenant_id: string
 }
 
@@ -112,6 +123,29 @@ export interface ConversationDetail {
   state: string
   context_json: Record<string, unknown> | null
   messages: Message[]
+}
+
+export interface Learning {
+  id: string
+  type: string
+  suggestion_md: string
+  category: string
+  status: string
+  diagnosis: string
+  suggestion_type: string
+  confidence: number
+  conversation_id: string
+  created_at: string
+}
+
+export interface LearningStats {
+  total: number
+  pending: number
+  approved: number
+  rejected: number
+  snoozed: number
+  by_category: Record<string, number>
+  by_type: Record<string, number>
 }
 
 export interface MetricsOverview {
