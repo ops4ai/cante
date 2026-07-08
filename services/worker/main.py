@@ -205,6 +205,7 @@ def _build_tools(skill_data: dict | None) -> ToolRegistry:
                 parameters=dt.get("input_schema", {}),
                 http_method=dt["http"]["method"], http_url=dt["http"]["url"],
                 http_headers=dt["http"].get("headers", {}),
+                http_body=dt["http"].get("body"),
                 timeout_s=dt["http"].get("timeout_s", 10),
                 response_mapping=dt.get("response_mapping", "json"),
                 # SSRF egress allowlist (S3): security's is_safe_url consumes this.
@@ -215,17 +216,26 @@ def _build_tools(skill_data: dict | None) -> ToolRegistry:
 
 async def run_agent_loop(
     user_message: str, llm=None, tools=None, *, system_prompt: str | None = None,
-    history: list[dict] | None = None,
+    history: list[dict] | None = None, tool_context: dict | None = None,
 ) -> tuple[str, dict]:
     """Execute the agent loop with tool calling. Returns (reply, context_updates).
 
     *history* is a list of prior turns ``{role, content}`` (role: user|assistant)
     so the LLM has conversation context — this lets it vary its wording across
     turns instead of repeating the same reply to similar messages.
+
+    *tool_context* carries contact/conversation metadata (from_phone, number_id,
+    conversation_id, contact_id, tenant_id) that declared HTTP tools can inject
+    in their URL/headers/body via ``{{context.xxx}}`` — so an external endpoint
+    knows who's calling without the LLM having to repeat the phone number.
     """
     from cante.llm import LLMMessage, LLMToolDefinition
 
     ctx: dict[str, object] = {}
+    # Seed the tool context (prefixed with _ so it doesn't leak to the LLM as
+    # conversation state; DeclaredHttpTool._resolve_template reads these).
+    for k, v in (tool_context or {}).items():
+        ctx[f"_{k}"] = v
     if llm is None or tools is None:
         return f"[Cante M1 echo] Recebi: {user_message[:400]}", ctx
 
@@ -546,6 +556,16 @@ async def process(entry, bus, redis):
                 # turns) and the dedup guard knows the last outbound reply.
                 history, last_outbound = await _load_history(conv_id, tenant_id)
 
+                # Metadata passed to declared HTTP tools via {{context.xxx}} so
+                # an external endpoint (e.g. coletiva-cds) knows who's calling.
+                tool_context = {
+                    "from_phone": from_phone,
+                    "number_id": channel_id,
+                    "conversation_id": conv_id,
+                    "contact_id": _contact_id,
+                    "tenant_id": tenant_id,
+                }
+
                 # Build tools + adapter OUTSIDE any DB session (GOTCHAS §1).
                 tools = _build_tools(skill.tools)
                 llm = build_provider_adapter(provider, api_key)
@@ -554,6 +574,7 @@ async def process(entry, bus, redis):
                     body, llm, tools,
                     system_prompt=system_prompt,
                     history=history,
+                    tool_context=tool_context,
                 )
 
         # ── C12: Guard pipeline ──────────────────────────────────────────
@@ -584,6 +605,7 @@ async def process(entry, bus, redis):
             try:
                 reply, ctx_updates = await run_agent_loop(
                     body, llm, tools, system_prompt=vary_prompt, history=history,
+                    tool_context=tool_context,
                 )
             except Exception as e:
                 logger.warning("worker.regenerate_failed", conv=cid, error=str(e))

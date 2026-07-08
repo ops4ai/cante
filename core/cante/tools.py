@@ -1,5 +1,6 @@
 """Tool registry — built-in tools + declarative HTTP tools. Exported as LLM function schemas."""
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -72,6 +73,7 @@ class DeclaredHttpTool:
     http_method: str
     http_url: str
     http_headers: dict = field(default_factory=dict)
+    http_body: str | None = None  # optional JSON template for POST body
     timeout_s: int = 10
     response_mapping: str = "json"
     allowed_hosts: list = field(default_factory=list)
@@ -84,16 +86,34 @@ class DeclaredHttpTool:
     # misconfigured endpoint from exhausting worker memory.
     _MAX_RESPONSE_BYTES = 1_000_000  # 1 MiB
 
-    async def execute(self, arguments: dict, secrets: dict | None = None) -> Any:
+    @staticmethod
+    def _resolve_template(value: str, arguments: dict, context: dict, secrets: dict) -> str:
+        """Resolve {arg}, {{context.xxx}}, {{secret:xxx}} in a string."""
+        # LLM arguments: {date} -> value
+        for key, val in arguments.items():
+            value = value.replace(f"{{{key}}}", str(val))
+        # Context vars: {{context.from_phone}} -> value (keys prefixed with _ in ctx)
+        for key, val in context.items():
+            if key.startswith("_"):
+                clean = key[1:]  # _from_phone -> from_phone
+                value = value.replace(f"{{{{context.{clean}}}}}", str(val))
+        # Secrets: {{secret:name}} -> value
+        for sk, sv in secrets.items():
+            value = value.replace(f"{{{{secret:{sk}}}}}", str(sv))
+        return value
+
+    async def execute(self, arguments: dict, context: dict | None = None, secrets: dict | None = None) -> Any:
         import httpx
 
         method = (self.http_method or "GET").upper()
         if method not in self._SAFE_METHODS:
             raise ValueError(f"DeclaredHttpTool refuses method {method!r} (GET/POST only)")
 
-        url = self.http_url
-        for key, val in arguments.items():
-            url = url.replace(f"{{{key}}}", str(val))
+        ctx = context or {}
+        _secrets = secrets or {}
+
+        # URL: substitute {arg} (LLM) + {{context.xxx}} + {{secret:xxx}}
+        url = self._resolve_template(self.http_url, arguments, ctx, _secrets)
 
         # S3: SSRF egress filter — reject internal/metadata/file:// before any
         # request leaves the process. allowed_hosts (per-skill allowlist) is
@@ -103,24 +123,34 @@ class DeclaredHttpTool:
         if not is_safe_url(url, allowed_hosts=self.allowed_hosts):
             raise ValueError(f"DeclaredHttpTool refused unsafe URL: {url!r}")
 
-        headers = dict(self.http_headers)
-        # Resolve secret references: {{secret:integration_token}}
+        # Headers: substitute {{context.xxx}} + {{secret:xxx}} + {arg}
         resolved_headers: dict[str, str] = {}
-        _secrets = secrets or {}
-        for k, v in headers.items():
-            if v.startswith("{{secret:") and _secrets:
-                secret_name = v[len("{{secret:"):-2]
-                resolved_headers[k] = str(_secrets.get(secret_name, v))
-            else:
-                resolved_headers[k] = str(v)
+        for k, v in self.http_headers.items():
+            resolved_headers[k] = self._resolve_template(str(v), arguments, ctx, _secrets)
+        # Default content-type for POST with a body
+        if method == "POST" and "Content-Type" not in resolved_headers:
+            resolved_headers["Content-Type"] = "application/json"
+
+        # Body: if http_body template is set, resolve it; elif POST, send arguments as JSON
+        json_body: str | None = None
+        if self.http_body:
+            json_body = self._resolve_template(self.http_body, arguments, ctx, _secrets)
+        elif method == "POST":
+            # Default: send the LLM-extracted arguments as the JSON body, plus
+            # context vars so the endpoint knows who's calling.
+            payload = dict(arguments)
+            for key, val in ctx.items():
+                if key.startswith("_"):
+                    payload[key[1:]] = val
+            json_body = json.dumps(payload)
 
         # Redirects are disabled so a safe public host cannot bounce us to an
         # internal address. A 3xx is surfaced as an error rather than followed.
         client = _get_tools_http_client()
-        resp = await client.request(
-            method, url, headers=resolved_headers,
-            timeout=httpx.Timeout(self.timeout_s),
-        )
+        request_kwargs: dict = {"headers": resolved_headers, "timeout": httpx.Timeout(self.timeout_s)}
+        if json_body is not None:
+            request_kwargs["content"] = json_body
+        resp = await client.request(method, url, **request_kwargs)
         if resp.is_redirect:
             raise ValueError(
                 f"DeclaredHttpTool refused redirect to {resp.headers.get('location')!r}"
@@ -184,7 +214,7 @@ class ToolRegistry:
             return ToolCallResult(name=name, success=False, result=None, error=f"Unknown tool: {name}")
         try:
             if isinstance(tool, DeclaredHttpTool):
-                result = await tool.execute(arguments, secrets)
+                result = await tool.execute(arguments, context, secrets)
             else:
                 result = await tool.execute(arguments, context)
             return ToolCallResult(name=name, success=True, result=result)
