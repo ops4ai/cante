@@ -559,7 +559,7 @@ async def get_qr(num_id: str, principal: Principal = Depends(RequireRole("admin"
                     cfg["webhook_secret"] = secrets.token_urlsafe(32)
                     number.connection_config = cfg
                 try:
-                    webhook_url = f"http://cante-cds-ingress:8001/channels/{number.id}/webhook"
+                    webhook_url = f"{settings.ingress_base_url}/channels/{number.id}/webhook"
                     await adapter.set_webhook(
                         cfg["instance"],
                         webhook_url,
@@ -1453,7 +1453,7 @@ async def create_trigger(data: TriggerCreateIn, request: Request):
     from cante.redis import get_redis
     redis = await get_redis()
     bus = RedisStreamsBus(redis)
-    await bus.publish("stream:triggers", {"conversation_id": data.conversation_id, "from_phone": data.to_phone, "number_phone": data.from_number, "body": data.body})
+    await bus.publish("stream:triggers", {"conversation_id": data.conversation_id, "from_phone": data.to_phone, "channel_id": data.from_number, "body": data.body})
     return {"status": "queued"}
 
 

@@ -217,6 +217,7 @@ def _build_tools(skill_data: dict | None) -> ToolRegistry:
 async def run_agent_loop(
     user_message: str, llm=None, tools=None, *, system_prompt: str | None = None,
     history: list[dict] | None = None, tool_context: dict | None = None,
+    secrets: dict | None = None,
 ) -> tuple[str, dict]:
     """Execute the agent loop with tool calling. Returns (reply, context_updates).
 
@@ -228,6 +229,9 @@ async def run_agent_loop(
     conversation_id, contact_id, tenant_id) that declared HTTP tools can inject
     in their URL/headers/body via ``{{context.xxx}}`` — so an external endpoint
     knows who's calling without the LLM having to repeat the phone number.
+
+    *secrets* carries secret values (e.g. API tokens) that declared HTTP tools
+    can inject in their URL/headers/body via ``{{secret:name}}``.
     """
     from cante.llm import LLMMessage, LLMToolDefinition
 
@@ -255,12 +259,16 @@ async def run_agent_loop(
     messages.append(LLMMessage(role="user", content=user_message))
 
     tool_defs = [LLMToolDefinition(name=t.name, description=t.description, parameters=t.parameters) for t in tools.list_tools()]
+    logger.info("worker.llm_call", tool_count=len(tool_defs), tool_names=[t.name for t in tool_defs])
 
     failures = 0
+    called_tools: set[str] = set()
+    hallucination_retries = 0
     for _ in range(settings.max_tool_iterations):
         try:
             response = await llm.complete(messages, tool_defs, temperature=0.7, max_tokens=1024)
             if response.tool_calls:
+                logger.info("worker.llm_tool_calls", tool_calls=[tc.name for tc in response.tool_calls])
                 # Carry the assistant's own tool_calls into history ONCE, before the
                 # tool results — both OpenAI and Anthropic reject a follow-up request
                 # that drops the assistant tool_calls the results refer to (C3).
@@ -268,14 +276,46 @@ async def run_agent_loop(
                     LLMMessage(role="assistant", content=response.content or "", tool_calls=response.tool_calls)
                 )
                 for tc in response.tool_calls:
-                    result = await tools.execute(tc.name, tc.arguments, ctx, None)
+                    called_tools.add(tc.name)
+                    result = await tools.execute(tc.name, tc.arguments, ctx, secrets)
+                    logger.info("worker.tool_executed", tool=tc.name, success=result.success, error=result.error)
                     messages.append(LLMMessage(
                         role="tool",
                         content=json.dumps({"result": result.result}) if result.success else f"Error: {result.error}",
                         tool_call_id=tc.id, name=tc.name,
                     ))
             else:
-                return response.content or "Desculpa, não percebi.", ctx
+                content = response.content or ""
+                # Guard: detect when the LLM fabricates a numeric code in its text
+                # response instead of calling a tool to obtain it. LLMs sometimes
+                # invent plausible-looking values (PIN codes, OTP tokens, etc.)
+                # rather than invoking the tool that would generate a real one.
+                # If the model responded with a 6-digit number but never called
+                # any tool, force a retry instructing it to use a tool.
+                if (
+                    not called_tools
+                    and hallucination_retries < 2
+                    and re.search(r'\b\d{6}\b', content)
+                ):
+                    hallucination_retries += 1
+                    logger.warning(
+                        "worker.hallucinated_code_detected",
+                        retry=hallucination_retries,
+                        called_tools=list(called_tools),
+                    )
+                    messages.append(LLMMessage(role="assistant", content=content))
+                    messages.append(LLMMessage(
+                        role="user",
+                        content=(
+                            "STOP. You just sent a 6-digit code without calling a "
+                            "tool. That code is FAKE and will not work. You MUST "
+                            "call the appropriate tool to get a real code. Call "
+                            "the tool now — do not respond with text."
+                        ),
+                    ))
+                    continue
+                logger.info("worker.llm_text_response", content_length=len(content))
+                return content or "Desculpa, não percebi.", ctx
             failures = 0
         except Exception as e:
             failures += 1
@@ -557,7 +597,7 @@ async def process(entry, bus, redis):
                 history, last_outbound = await _load_history(conv_id, tenant_id)
 
                 # Metadata passed to declared HTTP tools via {{context.xxx}} so
-                # an external endpoint (e.g. coletiva-cds) knows who's calling.
+                # an external endpoint (e.g. a backend API) knows who's calling.
                 tool_context = {
                     "from_phone": from_phone,
                     "number_id": channel_id,
@@ -565,6 +605,11 @@ async def process(entry, bus, redis):
                     "contact_id": _contact_id,
                     "tenant_id": tenant_id,
                 }
+
+                # Secrets passed to declared HTTP tools for {{secret:xxx}} template
+                # resolution. Keys match the {{secret:NAME}} placeholders in skill
+                # tool configs. Forks add their own secrets here.
+                _secrets: dict[str, str] = {}
 
                 # Build tools + adapter OUTSIDE any DB session (GOTCHAS §1).
                 tools = _build_tools(skill.tools)
@@ -575,6 +620,7 @@ async def process(entry, bus, redis):
                     system_prompt=system_prompt,
                     history=history,
                     tool_context=tool_context,
+                    secrets=_secrets,
                 )
 
         # ── C12: Guard pipeline ──────────────────────────────────────────
@@ -606,6 +652,7 @@ async def process(entry, bus, redis):
                 reply, ctx_updates = await run_agent_loop(
                     body, llm, tools, system_prompt=vary_prompt, history=history,
                     tool_context=tool_context,
+                    secrets=_secrets,
                 )
             except Exception as e:
                 logger.warning("worker.regenerate_failed", conv=cid, error=str(e))
