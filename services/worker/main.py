@@ -557,7 +557,7 @@ async def process(entry, bus, redis):
                 history, last_outbound = await _load_history(conv_id, tenant_id)
 
                 # Metadata passed to declared HTTP tools via {{context.xxx}} so
-                # an external endpoint (e.g. coletiva-cds) knows who's calling.
+                # an external endpoint (e.g. a backend API) knows who's calling.
                 tool_context = {
                     "from_phone": from_phone,
                     "number_id": channel_id,
