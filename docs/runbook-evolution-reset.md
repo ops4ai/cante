@@ -15,19 +15,19 @@ Confirma primeiro que o problema não é resolúvel com um simples restart.
 
 1. Confirma que há erro real e não é alarme falso:
    ```bash
-   cd /root/ops4ai/cante-cds && source .env
-   docker exec cante-cds-postgres psql -U cante -d cante -tAc \
+   cd /root/ops4ai/cante && source .env
+   docker exec cante-postgres psql -U cante -d cante -tAc \
      "SELECT status, count(*) FROM evolution_api.\"MessageUpdate\" GROUP BY status;"
    ```
 
 2. Verifica o estado da instância:
    ```bash
    curl -sH "apikey:$EVOLUTION_API_KEY" \
-     http://127.0.0.1:8088/instance/connectionState/cante35192830041502bc4b
+     http://127.0.0.1:8088/instance/connectionState/canteEXAMPLEINSTANCE
    # Esperado: {"instance":{"state":"open"}}
    # Se != "open", tenta um reconnect antes do reset:
    # curl -sH "apikey:$EVOLUTION_API_KEY" \
-   #   "http://127.0.0.1:8088/instance/connect/cante35192830041502bc4b"
+   #   "http://127.0.0.1:8088/instance/connect/canteEXAMPLEINSTANCE"
    ```
 
 3. Verifica instâncias:
@@ -42,7 +42,7 @@ Confirma primeiro que o problema não é resolúvel com um simples restart.
 
 ### Passo 1: Parar o sender
 ```bash
-cd /root/ops4ai/cante-cds
+cd /root/ops4ai/cante
 docker compose stop sender
 ```
 O sender é o único serviço que envia mensagens. Pará-lo evita que tente enviar
@@ -50,7 +50,7 @@ durante o reset, acumulando erro.
 
 ### Passo 2: Limpar a stream Redis de outbound
 ```bash
-docker exec cante-cds-redis redis-cli XTRIM stream:outbound MAXLEN 0
+docker exec cante-redis redis-cli XTRIM stream:outbound MAXLEN 0
 ```
 Remove mensagens pendentes que já não vão ser entregues (a instância vai ser
 recriada).
@@ -58,7 +58,7 @@ recriada).
 ### Passo 3: Apagar dados da Evolution
 ```bash
 # Truncar todas as tabelas do schema evolution_api
-docker exec cante-cds-postgres psql -U cante -d cante -tAc "
+docker exec cante-postgres psql -U cante -d cante -tAc "
 DO \$\$ DECLARE
     r RECORD;
 BEGIN
@@ -69,23 +69,23 @@ END \$\$;
 "
 
 # Apagar ficheiros de estado da instância (sessão Signal, credenciais)
-docker exec cante-cds-evolution rm -rf /evolution/instances/*
+docker exec cante-evolution rm -rf /evolution/instances/*
 
 # Reiniciar o Evolution (recria as tabelas via Prisma migrations)
-docker restart cante-cds-evolution
+docker restart cante-evolution
 ```
 
 ### Passo 4: No telemóvel — remover dispositivo
 1. Abrir WhatsApp
 2. Definições → Dispositivos ligados
-3. Remover "Ops4.AI" (ou qualquer dispositivo cante-cds)
+3. Remover "Ops4.AI" (ou qualquer dispositivo cante)
 
 ### Passo 5: Recriar a instância + scan QR
 
 **Opção A — Via curl (rápido):**
 ```bash
 source .env
-INSTANCE="cante35192830041502bc4b"
+INSTANCE="canteEXAMPLEINSTANCE"
 
 # Criar instância
 curl -s -X POST "http://127.0.0.1:8088/instance/create" \
@@ -116,15 +116,15 @@ curl -s -H "apikey:${EVOLUTION_API_KEY}" \
 
 **Opção B — Via API do cante (recomendado se disponível):**
 `POST /v1/numbers` com os dados do número — a API cria a instância, configura o
-webhook, e devolve o QR code. Usa o backoffice em `https://cante-cds.srv.ops4.ai`.
+webhook, e devolve o QR code. Usa o backoffice em `https://cante.srv.example.com`.
 
 ### Passo 6: Configurar webhook
 
 ```bash
 source .env
-INSTANCE="cante35192830041502bc4b"
-WEBHOOK_SECRET=$(docker exec cante-cds-postgres psql -U cante -d cante -tAc \
-  "SELECT connection_config->>'webhook_secret' FROM \"Number\" WHERE phone = '+351928300415';")
+INSTANCE="canteEXAMPLEINSTANCE"
+WEBHOOK_SECRET=$(docker exec cante-postgres psql -U cante -d cante -tAc \
+  "SELECT connection_config->>'webhook_secret' FROM \"Number\" WHERE phone = '+351900000001';")
 
 curl -s -X POST "http://127.0.0.1:8088/webhook/set/${INSTANCE}" \
   -H "apikey:${EVOLUTION_API_KEY}" \
@@ -132,7 +132,7 @@ curl -s -X POST "http://127.0.0.1:8088/webhook/set/${INSTANCE}" \
   -d "{
     \"webhook\": {
       \"enabled\": true,
-      \"url\": \"http://cante-cds-ingress:8001/channels/{number_id}/webhook\",
+      "url": \"http://cante-ingress:8001/channels/{number_id}/webhook\",
       \"byEvents\": true,
       \"events\": [\"MESSAGES_UPSERT\"],
       \"headers\": {\"x-webhook-token\": \"${WEBHOOK_SECRET}\"}
@@ -147,7 +147,7 @@ docker compose start sender
 
 ### Passo 8: Teste de entrega
 De outro telemóvel (não o pareado), envia uma mensagem para o número do bot
-(+351928300415) e verifica:
+(+351900000001) e verifica:
 ```sql
 -- Após alguns segundos:
 SELECT status, count(*) FROM evolution_api."MessageUpdate"
