@@ -137,15 +137,17 @@ def _ip_is_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
 
 
 def is_safe_url(url: str, allowed_hosts: Iterable[str] | None = None) -> bool:
-    """Return True iff *url* is an http(s) URL to a public, non-internal host.
+    """Return True iff *url* is an http(s) URL to a safe host.
 
     Checks:
     * scheme is http or https (rejects ``file://``, ``gopher://``, …);
-    * host (after DNS resolution) is not in loopback / private / link-local /
-      cloud-metadata / reserved space — unresolvable hosts are rejected
-      (fail-closed);
-    * if *allowed_hosts* is non-empty, the URL host must match one of them
-      (case-insensitive; port-agnostic).
+    * if *allowed_hosts* is non-empty and the URL host matches one of them,
+      the host is **trusted** and IP-level checks are skipped — this allows
+      Docker internal services (which resolve to private IPs) to be used as
+      HTTP tool targets (case-insensitive; port-agnostic);
+    * otherwise, host (after DNS resolution) is not in loopback / private /
+      link-local / cloud-metadata / reserved space — unresolvable hosts are
+      rejected (fail-closed).
     """
     if not isinstance(url, str) or not url.strip():
         return False
@@ -156,11 +158,14 @@ def is_safe_url(url: str, allowed_hosts: Iterable[str] | None = None) -> bool:
     if not host:
         return False
 
-    # Allowlist check first — explicit deny always wins.
+    # Allowlist check — explicit trust: if host matches allowed_hosts, skip
+    # IP-level checks (Docker internal services resolve to private IPs).
     if allowed_hosts:
         wanted = {h.lower().split(":")[0] for h in allowed_hosts}
-        if host.lower() not in wanted:
-            return False
+        if host.lower() in wanted:
+            return True
+        # Host not in allowlist — reject.
+        return False
 
     # Resolve every A/AAAA record; if *any* address is internal, reject.
     try:

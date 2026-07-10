@@ -41,6 +41,7 @@ class AnthropicAdapter(LLMAdapter):
         temperature: float = 0.7,
         max_tokens: int = 4096,
         model: str = "claude-sonnet-4-20250514",
+        tool_choice: dict | None = None,
     ) -> LLMResponse:
         # Convert to Anthropic format. Anthropic models tool-use as content
         # blocks: an assistant turn carries [{type: text}, {type: tool_use}];
@@ -94,6 +95,8 @@ class AnthropicAdapter(LLMAdapter):
             body["system"] = system_prompt.strip()
         if anthropic_tools:
             body["tools"] = anthropic_tools
+        if tool_choice:
+            body["tool_choice"] = tool_choice
 
         try:
             resp = await self._client.post(
